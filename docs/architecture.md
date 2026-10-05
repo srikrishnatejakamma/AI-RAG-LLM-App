@@ -1,12 +1,18 @@
 # Architecture and operating decisions
 
+## Scope and service layout
+
+`java-backend/` is the primary Spring Boot application. It serves the built-in UI and API; the React application in `frontend/` can run through Vite during development or be packaged into the Java application for deployment. Docker Compose builds the Java application and React UI and starts PostgreSQL with pgvector.
+
+`python-backend/` is an optional FastAPI implementation of the API. It uses in-memory storage and is not part of the Docker Compose deployment. The Java application defaults to port 8080; the Python run command in the README also selects port 8080. Use different ports if running both, and note that the React development proxy targets the Java application.
+
 ## Request path
 
 The application is a modular Spring Boot service with a browser UI served from the same origin. Collections scope every document and every retrieval query. Upload requests validate size, extension, and detected file type, calculate a SHA-256 checksum, and return while a bounded worker pool parses, chunks, embeds, and indexes the document. The UI polls for `PROCESSING`, `READY`, and `FAILED` status. Failed documents can be retried by uploading the same file again.
 
 The original static UI remains at `/`. A separate React/Vite app lives in `frontend/`; its development server runs at `http://localhost:5173/react/` and proxies API, login, and logout requests to Spring Boot. A Vite production build is packaged by Gradle or the multi-stage Docker build and served from `/react/` by the backend.
 
-Retrieval returns up to `RAG_RETRIEVAL_TOP_K` chunks (default 10, clamped to 3..20) from the requested collection that meet the configured minimum similarity score. Low-scoring chunks are not added just to fill the result list. PostgreSQL uses pgvector cosine search and HNSW; local mode uses deterministic 1,536-dimensional feature hashing and an in-memory index. PDF chunks preserve page numbers. Chat can call a configurable OpenAI compatible endpoint; without a key it selects concise, question-relevant sentences from retrieved passages. Source citations are returned separately. The prompt treats all file content as untrusted evidence and tells the model to ignore embedded instructions.
+Retrieval returns up to `RAG_RETRIEVAL_TOP_K` chunks (default 10, clamped to 3..20) from the requested collection that meet the configured minimum similarity score. Low-scoring chunks are not added just to fill the result list. PostgreSQL uses pgvector cosine search and HNSW; local mode uses deterministic 1,536-dimensional feature hashing and an in-memory index. PDF chunks preserve page numbers. Java answer generation uses the configured OpenAI-compatible endpoint when available and falls back to concise, question-relevant extractive answers otherwise. Chat responses include answer text and source citations as separate fields. Prompts treat uploaded text as untrusted evidence and instruct the model to ignore embedded instructions.
 
 ## Storage choices
 
@@ -33,9 +39,9 @@ The database records the embedding profile used to create vectors. Startup fails
 - Spring Security sessions use BCrypt-backed environment-provisioned accounts, SameSite/HTTP-only cookies, and CSRF tokens. `ADMIN`, `EDITOR`, and `VIEWER` are enforced at the HTTP and method layers.
 - Request logs use Logstash JSON with request IDs. Audit records contain actor, action, outcome, resource identifiers, and request ID, but not question text, passwords, or document content. PostgreSQL retains audit events; local memory mode keeps the most recent 10,000.
 - `GET /api/admin/audit` is admin-only and cursor-paginated. OpenAPI is generated at `/v3/api-docs`; Swagger UI is at `/swagger-ui.html`.
-- Roles are instance-wide: all authenticated users currently see the same collections. Add tenant ownership and an OIDC identity provider with MFA before exposing this to multiple organizations or the public internet. Account provisioning is environment-based; there is no self-service user management or password reset flow.
+- Roles are instance-wide: all authenticated users currently see the same collections. Add tenant-scoped collection ownership and an OIDC identity provider with MFA before exposing this to multiple organizations or the public internet. Account provisioning is environment-based; there is no self-service user management or password reset flow.
 - Set `SESSION_COOKIE_SECURE=true` behind HTTPS. Authentication throttling and audit retention policy should be configured at the identity provider and deployment boundary for production.
 
 ## Trade-offs and next steps
 
-The single service keeps the assessment inspectable and avoids premature service boundaries. The local feature-hash adapter is useful offline, but it is lexical and less accurate for paraphrases than a semantic embedding model. Production deployments should configure semantic embeddings and keep the configured model stable. OCR for image-only PDFs, multi-user authorization, chat history, durable upload blob storage, reindex jobs, audit events, and metrics are sensible additions for regulated or high-volume workloads. The current in-memory mode does not survive restarts; PostgreSQL mode is the persistence path.
+The single Java service keeps the assessment inspectable and avoids premature service boundaries. The local feature-hash adapter is useful offline, but it is lexical and less accurate for paraphrases than a semantic embedding model. Production deployments should configure semantic embeddings and keep the configured model stable. The current PostgreSQL schema persists document metadata and extracted chunks, not the original uploaded files. Useful future work includes OCR for image-only PDFs, tenant-scoped authorization, persisted chat history, durable upload blob storage, reindex workflows, audit retention controls, and metrics. The current in-memory mode does not survive restarts; PostgreSQL mode is the persistence path.
