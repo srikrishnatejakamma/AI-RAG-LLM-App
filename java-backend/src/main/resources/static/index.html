@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f6f2"><title>Gather — Document intelligence</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <aside class="rail"><a class="brand" href="#" aria-label="Gather home">g<span>·</span></a><div class="rail-icon active">▤</div><div class="rail-icon">⌕</div><div class="rail-spacer"></div><div class="avatar">R</div></aside>
+  <main class="shell">
+    <header><div><p class="eyebrow">YOUR KNOWLEDGE SPACE</p><h1>Document intelligence</h1></div><div class="session"><span class="status"><i></i> Secure workspace</span><button id="session-control" class="session-button" hidden></button></div></header>
+    <section class="intro"><div><span class="spark">✳</span><h2>Ask your documents.</h2><p>Bring a set of files together. Get answers with the passages that support them.</p></div><div class="intro-mark">G</div></section>
+    <section class="workspace">
+      <aside class="collections panel">
+        <div class="section-heading"><div><span class="eyebrow">LIBRARY</span><h3>Collections</h3></div><button class="icon-button" id="new-collection" aria-label="Create collection" hidden>＋</button></div>
+        <div id="collection-list" class="collection-list"></div>
+        <div class="privacy-note"><span>⌑</span><div><strong>Private by default</strong><small>Documents stay in their collection.</small></div></div>
+      </aside>
+      <section class="content panel">
+        <div class="content-top"><div><span class="eyebrow" id="collection-label">GET STARTED</span><h3 id="collection-title">Create a collection</h3></div><button class="button button-soft" id="upload-button" disabled>＋ Add documents</button><input id="file-input" type="file" accept=".pdf,.docx,.txt" multiple hidden></div>
+        <div id="empty-state" class="empty-state"><div class="empty-icon">↥</div><h4>Your documents, in one place</h4><p>Create a collection to start. Upload PDF, DOCX, or TXT files up to 10 MB.</p><button class="button button-dark" id="empty-create" hidden>Create your first collection</button></div>
+        <div id="document-strip" class="document-strip"></div>
+        <div class="chat" id="chat"><div class="chat-welcome"><span class="welcome-icon">✳</span><h4>What would you like to know?</h4><p>Answers include source passages so you can check the evidence.</p></div><div id="messages" class="messages"></div></div>
+        <form id="ask-form" class="ask-form"><textarea id="question" rows="1" placeholder="Ask a question about this collection…" disabled maxlength="2000"></textarea><button id="ask-button" class="send-button" disabled aria-label="Send question">↑</button><div class="input-hint">Enter to send · answers are grounded in your documents</div></form>
+      </section>
+    </section>
+    <footer><span>GATHER <span class="footer-dot">·</span> DOCUMENT WORKSPACE</span><span>Sources included with every answer</span></footer>
+  </main>
+  <dialog id="collection-dialog"><form method="dialog" id="collection-form"><span class="eyebrow">NEW WORKSPACE</span><h2>Create a collection</h2><p>Collections keep document sets separate for focused answers.</p><label for="collection-name">Collection name</label><input id="collection-name" maxlength="80" placeholder="e.g. Team handbook" required><div class="dialog-actions"><button class="button button-soft" id="cancel-collection" type="button">Cancel</button><button class="button button-dark" id="create-button" value="default">Create collection</button></div><div id="dialog-error" class="error"></div></form></dialog>
+  <dialog id="auth-dialog"><form id="auth-form"><span class="eyebrow">SECURE SIGN IN</span><h2>Welcome back</h2><p>Sign in to access your document collections.</p><label for="auth-username">Username</label><input id="auth-username" name="username" autocomplete="username" required><label for="auth-password">Password</label><input id="auth-password" name="password" type="password" autocomplete="current-password" required><div class="dialog-actions"><button class="button button-dark" id="auth-submit">Sign in</button></div><div id="auth-error" class="error"></div></form></dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

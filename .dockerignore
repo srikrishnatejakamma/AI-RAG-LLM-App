@@ -1,0 +1,7 @@
+.git
+.gradle-home
+.gradle
+**/build
+**/.gradle
+work context.txt
+*.log

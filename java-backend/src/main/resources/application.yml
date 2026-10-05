@@ -1,0 +1,61 @@
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 100
+      min-spare: 10
+    max-connections: 500
+    accept-count: 100
+spring:
+  application:
+    name: agentic-rag-generator
+  main:
+    banner-mode: "off"
+  lifecycle:
+    timeout-per-shutdown-phase: 25s
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+      chat:
+        options:
+          model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
+    session:
+      cookie:
+        http-only: true
+        secure: ${SESSION_COOKIE_SECURE:false}
+        same-site: strict
+rag:
+  storage: ${RAG_STORAGE:memory}
+  chunk-size: 1200
+  chunk-overlap: 180
+  max-upload-bytes: 10485760
+  embedding:
+    provider: ${RAG_EMBEDDING_PROVIDER:local}
+  retrieval:
+    provider: ${RAG_RETRIEVAL_PROVIDER:local}
+    minimum-score: ${RAG_RETRIEVAL_MINIMUM_SCORE:0.04}
+    top-k: ${RAG_RETRIEVAL_TOP_K:10}
+  answer:
+    provider: ${RAG_ANSWER_PROVIDER:auto}
+  openai:
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    api-key: ${OPENAI_API_KEY:}
+    chat-model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+    embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+    vector-store-id: ${OPENAI_VECTOR_STORE_ID:}
+logging:
+  structured:
+    format:
+      console: logstash
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs

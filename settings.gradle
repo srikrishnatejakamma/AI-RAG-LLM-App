@@ -1,0 +1,2 @@
+rootProject.name = 'agentic-rag-generator'
+include 'java-backend'
