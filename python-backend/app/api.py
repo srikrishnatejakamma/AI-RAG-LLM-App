@@ -18,8 +18,9 @@ from .domain import CollectionData, DocumentData, SessionData
 from .file_search import OpenAIFileSearch
 from .ingestion import ingest_document
 from .models import AuditPage, ChatRequest, ChatResponse, CollectionView, CreateCollectionRequest, CsrfView, DocumentView, HealthView, SessionView
+from .retrieval import HybridRetriever
 from .store import MemoryStore
-from .text_pipeline import checksum, cosine
+from .text_pipeline import checksum
 
 
 log = logging.getLogger("python-rag-backend")
@@ -43,6 +44,7 @@ class AppContext:
         self.store = MemoryStore()
         self.sessions: dict[str, SessionData] = {}
         self.embedding_service = EmbeddingService(self.settings)
+        self.retriever = HybridRetriever()
         self.agent = OpenAIAgentOrchestrator(self.settings)
         self.file_search = OpenAIFileSearch(self.settings)
         self.ingestion_slots = asyncio.BoundedSemaphore(6)
@@ -210,7 +212,7 @@ async def health() -> dict[str, str]:
     result = {
         "status": "ok",
         "storage": "memory",
-        "embeddingProvider": "openai" if ctx.settings.embedding_provider == "openai" else "local",
+        "embeddingProvider": ctx.settings.embedding_provider_name(),
     }
     result.update(ctx.settings.answer_provider_health())
     result.update(ctx.settings.retrieval_provider_health())
@@ -482,17 +484,22 @@ async def chat(
         await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")
         return {"answer": answer, "sources": citations, "grounded": True}
 
-    query_vec = ctx.embedding_service.embed(question)
-    matches: list[tuple[DocumentData, Any, float]] = []
-    for document in collection.documents.values():
-        if document.status != "READY":
-            continue
-        for chunk in document.chunks:
-            score = cosine(query_vec, chunk.vector)
-            if score >= ctx.settings.minimum_score:
-                matches.append((document, chunk, score))
-    matches.sort(key=lambda m: m[2], reverse=True)
-    matches = matches[: max(ctx.settings.retrieval_top_k, 20) if broad_summary else ctx.settings.retrieval_top_k]
+    query_vec = await asyncio.to_thread(ctx.embedding_service.embed, question)
+    ready_chunks = tuple(
+        (document, chunk)
+        for document in collection.documents.values()
+        if document.status == "READY"
+        for chunk in document.chunks
+    )
+    matches = await asyncio.to_thread(
+        ctx.retriever.retrieve,
+        collection.id,
+        ready_chunks,
+        query_vec,
+        question,
+        max(ctx.settings.retrieval_top_k, 20) if broad_summary else ctx.settings.retrieval_top_k,
+        ctx.settings.minimum_score,
+    )
 
     if not matches:
         processing = any(doc.status == "PROCESSING" for doc in collection.documents.values())

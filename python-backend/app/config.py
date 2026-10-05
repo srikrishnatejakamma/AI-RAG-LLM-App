@@ -17,6 +17,7 @@ class Settings:
     minimum_score: float = float(os.getenv("RAG_RETRIEVAL_MINIMUM_SCORE", "0.04"))
     retrieval_top_k: int = max(3, min(20, int(os.getenv("RAG_RETRIEVAL_TOP_K", "10"))))
     embedding_provider: str = os.getenv("RAG_EMBEDDING_PROVIDER", "local").lower()
+    embedding_model: str = os.getenv("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     retrieval_provider: str = os.getenv("RAG_RETRIEVAL_PROVIDER", "local").lower()
     answer_provider: str = os.getenv("RAG_ANSWER_PROVIDER", "auto").lower()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
@@ -78,6 +79,9 @@ class Settings:
             "answerProviderStatus": "ok",
             "answerProviderMessage": "OPENAI_API_KEY is configured. Provider connectivity is verified at runtime.",
         }
+
+    def embedding_provider_name(self) -> str:
+        return self.embedding_provider if self.embedding_provider in {"local", "openai", "transformers"} else "invalid"
 
     def retrieval_provider_health(self) -> dict[str, str]:
         if self.retrieval_provider not in {"local", "openai-file-search"}:

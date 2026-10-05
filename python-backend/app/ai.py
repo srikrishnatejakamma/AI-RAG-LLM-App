@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable
@@ -41,12 +42,19 @@ class EmbeddingService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.client = create_openai_client(settings)
+        self._transformer_model: Any | None = None
+        self._transformer_tokenizer: Any | None = None
+        self._transformer_load_lock = threading.Lock()
+        if settings.embedding_provider not in {"local", "openai", "transformers"}:
+            raise ValueError("RAG_EMBEDDING_PROVIDER must be local, openai, or transformers")
 
     def embed_many(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        if self.settings.embedding_provider != "openai":
+        if self.settings.embedding_provider == "local":
             return [embed_local(text) for text in texts]
+        if self.settings.embedding_provider == "transformers":
+            return self._embed_transformers(texts)
         if not self.client:
             raise RuntimeError("OPENAI_API_KEY is required when RAG_EMBEDDING_PROVIDER=openai")
         vectors: list[list[float]] = []
@@ -70,6 +78,45 @@ class EmbeddingService:
             if any(vector is None for vector in ordered):
                 raise RuntimeError("Embedding provider returned invalid item indexes")
             vectors.extend(vector for vector in ordered if vector is not None)
+        return vectors
+
+    def _embed_transformers(self, texts: list[str]) -> list[list[float]]:
+        try:
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "The transformers embedding provider requires the optional ML dependencies; "
+                "install python-backend/requirements-ml.txt"
+            ) from exc
+
+        if self._transformer_model is None or self._transformer_tokenizer is None:
+            with self._transformer_load_lock:
+                if self._transformer_model is None or self._transformer_tokenizer is None:
+                    tokenizer = AutoTokenizer.from_pretrained(self.settings.embedding_model)
+                    model = AutoModel.from_pretrained(self.settings.embedding_model)
+                    model.eval()
+                    self._transformer_tokenizer = tokenizer
+                    self._transformer_model = model
+
+        vectors: list[list[float]] = []
+        # Small batches keep CPU and memory use predictable for this in-memory service.
+        for start in range(0, len(texts), 16):
+            batch = texts[start : start + 16]
+            encoded = self._transformer_tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt",
+            )
+            with torch.inference_mode():
+                output = self._transformer_model(**encoded)
+                token_embeddings = output.last_hidden_state
+                mask = encoded["attention_mask"].unsqueeze(-1).to(token_embeddings.dtype)
+                pooled = (token_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+                normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
+            vectors.extend(normalized.cpu().tolist())
         return vectors
 
     def embed(self, text: str) -> list[float]:

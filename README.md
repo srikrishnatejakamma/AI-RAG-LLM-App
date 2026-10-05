@@ -64,7 +64,20 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 Its interactive API documentation is at <http://localhost:8080/swagger-ui.html>, OpenAPI JSON at <http://localhost:8080/v3/api-docs>, and ReDoc at <http://localhost:8080/redoc>. The React development proxy targets Java, so use the Python API directly unless you change the Vite proxy target.
 
-Both implementations support local retrieval by default. OpenAI features are optional and require `OPENAI_API_KEY`. Hosted File Search also requires `OPENAI_VECTOR_STORE_ID` and `RAG_RETRIEVAL_PROVIDER=openai-file-search`. See [architecture.md](docs/architecture.md) for provider details and design limits.
+The Python API combines local dense embeddings with a cached scikit-learn TF-IDF index for lexical retrieval. OpenAI features are optional and require `OPENAI_API_KEY`. Hosted File Search also requires `OPENAI_VECTOR_STORE_ID` and `RAG_RETRIEVAL_PROVIDER=openai-file-search`. See [architecture.md](docs/architecture.md) for provider details and design limits.
+
+For semantic local embeddings in the Python API, install its optional Hugging Face dependencies and select the Transformers provider:
+
+```powershell
+cd python-backend
+python -m pip install -r requirements-ml.txt
+$env:RAG_EMBEDDING_PROVIDER = "transformers"
+# Optional: choose a different Hugging Face encoder model.
+$env:RAG_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+```
+
+The model is downloaded on first use and cached by Hugging Face. This provider uses normalized mean-pooled Transformer embeddings; its vectors are kept in memory with this Python backend's in-memory documents. Keep one model configured for the lifetime of the process, and re-upload documents after changing models. The default `local` provider needs no model download or ML dependencies.
 
 ## Run with PostgreSQL
 

@@ -6,3 +6,4 @@ pypdf==5.1.0
 python-docx==1.1.2
 openai==1.52.2
 stop-words==2018.7.23
+scikit-learn>=1.4,<2
