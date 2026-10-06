@@ -543,9 +543,19 @@ async def chat(
             answer = ctx.agent.answer(contextual_question, context)
         except Exception as exc:
             log.warning("OpenAI agent failed, using fallback: %s", exc)
-            answer = extractive_answer(contextual_question, fallback_context, previous_answer if continuation else None)
+            answer = extractive_answer(
+                contextual_question,
+                fallback_context,
+                previous_answer if continuation else None,
+                overview=broad_summary,
+            )
     else:
-        answer = extractive_answer(contextual_question, fallback_context, previous_answer if continuation else None)
+        answer = extractive_answer(
+            contextual_question,
+            fallback_context,
+            previous_answer if continuation else None,
+            overview=broad_summary,
+        )
 
     citations = [build_citation(m) for m in matches]
     await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")

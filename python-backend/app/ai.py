@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
+import numpy as np
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -127,8 +128,9 @@ def extractive_answer(
     question: str,
     passages: list[str],
     previous_answer: str | None = None,
+    overview: bool | None = None,
 ) -> str:
-    overview = is_collection_overview(question, passages)
+    overview = is_collection_overview(question, passages) if overview is None else overview
     sections = _extract_document_sections(passages)
     if overview and sections:
         previous = (previous_answer or "").casefold()
@@ -218,9 +220,13 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
         return False
     coverage = query.nnz / len(terms)
     if query.nnz == 0:
-        return True
+        return False
     matched_idf = vectorizer.idf_[query.indices]
-    return coverage <= 0.5 or float(matched_idf.mean()) < float(vectorizer.idf_.mean())
+    # Use the active collection's information distribution to distinguish a
+    # collection-level request from one anchored by a distinctive document term.
+    # This avoids domain-specific intent words and adapts as documents change.
+    corpus_median_idf = float(np.median(vectorizer.idf_))
+    return coverage < 0.5 or float(matched_idf.mean()) < corpus_median_idf
 
 
 def contextualize_question(question: str, previous_questions: list[str], passages: list[str]) -> str:
@@ -234,13 +240,31 @@ def contextualize_question(question: str, previous_questions: list[str], passage
         return question
     query = vectorizer.transform([question])
     terms = set(vectorizer.build_analyzer()(question))
-    if query.nnz and len(terms) > 1:
+    query_idf = vectorizer.idf_[query.indices] if query.nnz else []
+    corpus_median_idf = float(np.median(vectorizer.idf_))
+    if query.nnz and len(terms) > 1 and float(query_idf.mean()) >= corpus_median_idf:
         return question
-    if query.nnz:
-        query_idf = vectorizer.idf_[query.indices]
-        if float(query_idf.mean()) >= float(vectorizer.idf_.mean()):
-            return question
-    return " ".join((*previous_questions, question))
+    if query.nnz and len(terms) == 1 and float(query_idf.mean()) > corpus_median_idf:
+        return question
+
+    # Pick the most informative earlier user turn from collection-derived TF-IDF
+    # features, rather than concatenating every previous turn (which adds noise).
+    candidates = [text for text in previous_questions if text.strip()]
+    if not candidates:
+        return question
+    previous_vectors = vectorizer.transform(candidates)
+    ranked = sorted(
+        range(len(candidates)),
+        key=lambda idx: (
+            -float(previous_vectors[idx].multiply(vectorizer.idf_).sum()),
+            -previous_vectors[idx].nnz,
+            -idx,
+        ),
+    )
+    best_previous = candidates[ranked[0]]
+    if previous_vectors[ranked[0]].nnz == 0:
+        return question
+    return f"{best_previous} {question}"
 
 
 def correct_query_spelling(question: str, passages: list[str]) -> str:
@@ -259,23 +283,47 @@ def correct_query_spelling(question: str, passages: list[str]) -> str:
 
 
 def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
-    sections: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    # A page's TOC-like rows are identified from its own layout evidence. This
+    # filters body sentences that happen to end in a number without assuming a
+    # handbook format or a fixed list of section names.
+    candidates: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for passage in passages:
+        source = re.match(r"^\[([^,\]]+).*?page\s+(\d+)\]\s*", passage, re.IGNORECASE)
+        document = source.group(1) if source else ""
+        source_page = source.group(2) if source else ""
         content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
         for line in content.splitlines():
-            # TOC rows are parsed from their document-specific trailing page number.
             match = re.match(r"^\s*(.*?)\s+(\d+)\s*$", line)
             if not match:
                 continue
-            title = normalize_text(match.group(1).rstrip(". "))
+            title = normalize_text(match.group(1).strip(" .\u2022-*\t"))
             page = match.group(2)
             if not title or not TOKEN_RE.search(title):
                 continue
-            entry = (title, page)
-            if entry not in seen:
-                sections.append(entry)
-                seen.add(entry)
+            candidates.setdefault((document, source_page), []).append((title, page))
+
+    sections: list[tuple[str, str]] = []
+    seen_titles: set[str] = set()
+    by_document: dict[str, list[tuple[str, str, list[tuple[str, str]]]]] = {}
+    for (document, source_page), rows in candidates.items():
+        by_document.setdefault(document, []).append((source_page, document, rows))
+    for pages in by_document.values():
+        counts = [len(rows) for _, _, rows in pages]
+        if not counts:
+            continue
+        # Relative density keeps the threshold tied to each document's own
+        # extracted layout, including shorter documents with fewer TOC rows.
+        peak = max(counts)
+        minimum_density = max(3, int(peak * 0.35))
+        for _, _, rows in pages:
+            if len(rows) < minimum_density:
+                continue
+            for title, page in rows:
+                key = title.casefold()
+                if key in seen_titles:
+                    continue
+                sections.append((title, page))
+                seen_titles.add(key)
     return sections
 
 
