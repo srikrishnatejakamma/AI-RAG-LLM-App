@@ -245,11 +245,19 @@ def parse_txt_text(data: bytes, encoding: str | None = None) -> str:
                 "Text encoding is ambiguous; install charset-normalizer or re-save the file as UTF-8"
             ) from exc
         match = from_bytes(data).best()
-        if match is None or match.chaos > 0.2 or (match.encoding == "ascii" and any(byte > 127 for byte in data)):
+        if (
+            match is None
+            or match.chaos > 0.2
+            or match.coherence < 0.2
+            or (match.encoding == "ascii" and any(byte > 127 for byte in data))
+        ):
             raise ValueError(
                 "Text encoding is uncertain; re-save the file as UTF-8 or configure its encoding"
             )
-        return match.output().decode(match.encoding)
+        # CharsetMatch.output() normalizes to UTF-8 by default. `str(match)`
+        # decodes using the detected source encoding and avoids re-decoding
+        # normalized UTF-8 bytes as (for example) Windows-1252.
+        return str(match)
 
 
 @lru_cache(maxsize=8)

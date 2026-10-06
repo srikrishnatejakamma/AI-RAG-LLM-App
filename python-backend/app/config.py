@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import importlib.util
+import shutil
 from dataclasses import dataclass, field
 
 
@@ -101,3 +103,48 @@ class Settings:
                 return {"retrievalProvider": self.retrieval_provider, "retrievalProviderStatus": "degraded", "retrievalProviderMessage": "OPENAI_API_KEY and OPENAI_VECTOR_STORE_ID are required for hosted File Search."}
             return {"retrievalProvider": self.retrieval_provider, "retrievalProviderStatus": "ok", "retrievalProviderMessage": "Hosted File Search is configured; connectivity is checked when used."}
         return {"retrievalProvider": self.retrieval_provider, "retrievalProviderStatus": "ok", "retrievalProviderMessage": "Local retrieval is enabled."}
+
+    def document_parser_health(self) -> dict[str, str]:
+        provider = self.document_parser_provider
+        if provider not in {"auto", "native", "docling"}:
+            return {
+                "documentParser": "invalid",
+                "documentParserStatus": "degraded",
+                "documentParserMessage": "RAG_DOCUMENT_PARSER must be auto, native, or docling.",
+            }
+        if provider == "native":
+            return {
+                "documentParser": "native",
+                "documentParserStatus": "ok",
+                "documentParserMessage": "Native parsing is enabled; OCR and advanced layout analysis are disabled.",
+            }
+        if importlib.util.find_spec("docling") is None:
+            return {
+                "documentParser": provider,
+                "documentParserStatus": "degraded",
+                "documentParserMessage": "Docling is missing; PDF and DOCX use the native fallback without OCR. Install python-backend requirements.",
+            }
+        if self.document_ocr_enabled:
+            if self.document_ocr_engine not in {"rapidocr", "tesseract"}:
+                return {
+                    "documentParser": provider,
+                    "documentParserStatus": "degraded",
+                    "documentParserMessage": "RAG_DOCUMENT_OCR_ENGINE must be rapidocr or tesseract.",
+                }
+            if self.document_ocr_engine == "rapidocr" and importlib.util.find_spec("rapidocr_onnxruntime") is None:
+                return {
+                    "documentParser": provider,
+                    "documentParserStatus": "degraded",
+                    "documentParserMessage": "RapidOCR is missing; install Docling with its rapidocr extra.",
+                }
+            if self.document_ocr_engine == "tesseract" and shutil.which("tesseract") is None:
+                return {
+                    "documentParser": provider,
+                    "documentParserStatus": "degraded",
+                    "documentParserMessage": "Tesseract is missing from PATH; install Tesseract or select RapidOCR.",
+                }
+        return {
+            "documentParser": provider,
+            "documentParserStatus": "ok",
+            "documentParserMessage": "Docling layout and OCR parsing are configured.",
+        }

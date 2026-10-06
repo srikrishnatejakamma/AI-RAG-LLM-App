@@ -221,9 +221,15 @@ async def health() -> dict[str, str]:
         "storage": "memory",
         "embeddingProvider": ctx.settings.embedding_provider_name(),
     }
+    result.update(ctx.settings.document_parser_health())
     result.update(ctx.settings.answer_provider_health())
     result.update(ctx.settings.retrieval_provider_health())
     result.update(ctx.settings.auth_health())
+    if any(
+        result.get(f"{provider}Status") == "degraded"
+        for provider in ("documentParser", "answerProvider", "retrievalProvider")
+    ):
+        result["status"] = "degraded"
     return result
 
 

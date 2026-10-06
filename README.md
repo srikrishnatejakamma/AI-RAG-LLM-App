@@ -66,6 +66,8 @@ Its interactive API documentation is at <http://localhost:8080/swagger-ui.html>,
 
 The Python API combines local dense embeddings with a cached scikit-learn TF-IDF index for lexical retrieval. OpenAI features are optional and require `OPENAI_API_KEY`. Hosted File Search also requires `OPENAI_VECTOR_STORE_ID` and `RAG_RETRIEVAL_PROVIDER=openai-file-search`. See [architecture.md](docs/architecture.md) for provider details and design limits.
 
+Document parsing uses Docling with RapidOCR for PDF/DOCX layout and OCR processing when the dependencies are installed. OCR and layout models may download on first use. Set `RAG_DOCUMENT_OCR_LANGUAGES` to comma-separated BCP-47 tags for your documents (for example, `iso:en,iso:hi`), `RAG_DOCUMENT_MAX_PAGES` to control the page limit, and `RAG_DOCUMENT_PARSER=native` to choose the lighter pypdf/python-docx fallback. The Python health response reports whether Docling and the configured OCR engine are available. TXT files are decoded automatically when confidence is adequate; for legacy files with uncertain encoding, set `RAG_TEXT_ENCODING` (for example, `cp1252` or `latin1`) before starting the backend.
+
 For semantic local embeddings in the Python API, install its optional Hugging Face dependencies and select the Transformers provider:
 
 ```powershell

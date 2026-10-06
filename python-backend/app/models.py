@@ -66,6 +66,9 @@ class HealthView(BaseModel):
     status: Literal["ok", "degraded"]
     storage: str
     embeddingProvider: str
+    documentParser: str
+    documentParserStatus: str
+    documentParserMessage: str
     answerProvider: str
     answerProviderStatus: str
     answerProviderMessage: str
