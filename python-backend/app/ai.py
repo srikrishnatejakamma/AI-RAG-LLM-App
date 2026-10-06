@@ -166,7 +166,7 @@ def extractive_answer(
         ]
         candidates = [sentence for sentence, _ in retained]
         candidate_passage_indexes = [passage_index for _, passage_index in retained]
-    if overview:
+    if overview and not candidates:
         policy_sections = _top_level_sections_with_children(section_rows)
         if policy_sections:
             prior_text = (previous_answer or "").casefold()
@@ -406,15 +406,21 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
         except ValueError:
             pass
     coverage = query.nnz / len(terms)
+    # Collection-wide commands often use generic wording absent from the
+    # uploaded domain text. Infer their scope from the active collection's
+    # vocabulary and query form rather than keeping a fixed intent phrase list.
+    is_non_interrogative = not question.rstrip().endswith("?")
     if query.nnz == 0:
-        return False
+        return len(terms) >= 2 and is_non_interrogative
     matched_idf = vectorizer.idf_[query.indices]
     # Use the active collection's information distribution to distinguish a
     # collection-level request from one anchored by a distinctive document term.
     # This avoids domain-specific intent words and adapts as documents change.
     corpus_median_idf = float(np.median(vectorizer.idf_))
-    if len(terms) <= 1 or coverage <= 0.5:
+    if len(terms) <= 1:
         return False
+    if coverage <= 0.5:
+        return len(terms) >= 3 and is_non_interrogative
     if len(terms) >= 3 and coverage >= 0.6:
         return False
     return float(matched_idf.mean()) < corpus_median_idf
