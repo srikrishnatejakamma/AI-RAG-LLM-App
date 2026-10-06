@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -12,7 +11,14 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadF
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response
 
-from .ai import EmbeddingService, OpenAIAgentOrchestrator, correct_query_spelling, extractive_answer
+from .ai import (
+    EmbeddingService,
+    OpenAIAgentOrchestrator,
+    contextualize_question,
+    correct_query_spelling,
+    extractive_answer,
+    is_collection_overview,
+)
 from .config import Settings
 from .domain import CollectionData, DocumentData, SessionData
 from .file_search import OpenAIFileSearch
@@ -459,9 +465,6 @@ async def chat(
 
     history = payload.history[-8:]
     prior_user_messages = [item.text for item in history if item.role == "user"]
-    previous_user = prior_user_messages[-1] if prior_user_messages else ""
-    if previous_user and re.search(r"\b(?:more|continue|elaborate|expand)\b", previous_user, re.IGNORECASE):
-        previous_user = next((item for item in reversed(prior_user_messages[:-1]) if item), previous_user)
     previous_answer = next((item.text for item in reversed(history) if item.role == "assistant"), "")
     ready_chunks = tuple(
         (document, chunk)
@@ -470,19 +473,11 @@ async def chat(
         for chunk in document.chunks
     )
     collection_text = [chunk.text for _, chunk in ready_chunks]
-    contextual_question = question
-    is_short_followup = len(re.findall(r"[\w']+", question)) <= 4
-    if previous_user and (is_short_followup or re.fullmatch(r"(?:tell me more|go on|continue|elaborate|expand(?: on that)?|explain further)[.!?\s]*", question, re.IGNORECASE)):
-        prior_intent = correct_query_spelling(previous_user, collection_text)
-        prior_was_summary = bool(re.search(r"\b(?:summari[sz]e|overview|highlights?|key\s+points?|main\s+polic(?:y|ies))\b", prior_intent, re.IGNORECASE))
-        contextual_question = (
-            previous_user + ". Continue with additional distinct policy sections."
-            if prior_was_summary else previous_user + ". Please explain further."
-        )
+    standalone_question = correct_query_spelling(question, collection_text)
+    contextual_question = contextualize_question(standalone_question, prior_user_messages, collection_text)
+    continuation = contextual_question != standalone_question
     contextual_question = correct_query_spelling(contextual_question, collection_text)
-
-    broad_policy_list = bool(re.search(r"\b(?:main|full|key|major|primary|all|list)\b.{0,32}\bpolic(?:y|ies)\b|\bpolic(?:y|ies)\b.{0,32}\b(?:main|full|key|major|primary|all|list)\b", contextual_question, re.IGNORECASE))
-    broad_summary = broad_policy_list or bool(re.search(r"\b(?:summari[sz]e|overview|highlights?)\b|\b(?:key|main)\s+points?\b", contextual_question, re.IGNORECASE))
+    broad_summary = is_collection_overview(contextual_question, collection_text)
     if ctx.settings.retrieval_provider == "openai-file-search":
         if not ctx.file_search.available:
             raise HTTPException(status_code=503, detail={"error": "Hosted File Search is not configured"})
@@ -548,9 +543,9 @@ async def chat(
             answer = ctx.agent.answer(contextual_question, context)
         except Exception as exc:
             log.warning("OpenAI agent failed, using fallback: %s", exc)
-            answer = extractive_answer(contextual_question, fallback_context, previous_answer or None)
+            answer = extractive_answer(contextual_question, fallback_context, previous_answer if continuation else None)
     else:
-        answer = extractive_answer(contextual_question, fallback_context, previous_answer or None)
+        answer = extractive_answer(contextual_question, fallback_context, previous_answer if continuation else None)
 
     citations = [build_citation(m) for m in matches]
     await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")
