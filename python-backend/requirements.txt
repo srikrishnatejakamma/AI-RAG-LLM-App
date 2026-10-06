@@ -5,6 +5,7 @@ httpx==0.28.1
 pypdf==5.1.0
 python-docx>=1.2,<2.0
 charset-normalizer>=3.4,<4
+python-dotenv>=1.0,<2
 pydantic>=2.12,<3
 docling[rapidocr]==2.129.0
 openai==1.52.2

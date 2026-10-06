@@ -6,6 +6,12 @@ import secrets
 import importlib.util
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
 log = logging.getLogger("python-rag-backend")
