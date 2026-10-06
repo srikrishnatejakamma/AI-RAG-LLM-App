@@ -1,0 +1,109 @@
+{
+  "corpus": [
+    {
+      "id": "leave_request",
+      "text": "Paid time off requests must be submitted to the employee's supervisor at least 10 calendar days before the requested start date. The supervisor approves requests based on team coverage."
+    },
+    {
+      "id": "record_retention",
+      "text": "Closed customer records must be retained for seven years after account closure. The records manager reviews the archive every year and documents approved destruction."
+    },
+    {
+      "id": "expense_reimbursement",
+      "text": "Employees must submit business expense claims with itemized receipts within 30 calendar days of purchase. A manager must approve the claim before Finance issues reimbursement."
+    },
+    {
+      "id": "password_security",
+      "text": "Account passwords must contain at least 14 characters. Employees must change a password immediately if they believe it has been exposed and must use multi-factor authentication."
+    },
+    {
+      "id": "equipment_return",
+      "text": "When employment ends, employees must return company laptops, badges, and other equipment to IT within five business days of their final working day."
+    },
+    {
+      "id": "travel_booking",
+      "text": "Business air travel must be booked in economy class. Hotel costs may not exceed 220 dollars per night before taxes unless a director approves an exception."
+    },
+    {
+      "id": "incident_reporting",
+      "text": "Employees must report a suspected security incident to the security team within one hour of discovery. Do not delete messages or files that may be relevant to the investigation."
+    },
+    {
+      "id": "parental_leave",
+      "text": "Eligible employees may take up to 12 weeks of parental leave after the birth or adoption of a child. Employees should notify Human Resources at least 30 days before leave when practicable."
+    },
+    {
+      "id": "office_schedule",
+      "text": "The main office is open from 8 a.m. until 6 p.m. Monday through Friday. The kitchen is cleaned by Facilities each evening."
+    },
+    {
+      "id": "training_budget",
+      "text": "A manager may approve up to 1,500 dollars per employee each year for job-related courses and certifications. Reimbursement requires proof of successful completion."
+    },
+    {
+      "id": "sick_leave",
+      "text": "Employees who cannot work because of illness should notify their supervisor before 9 a.m. A medical note is required after three consecutive workdays of absence."
+    },
+    {
+      "id": "data_access",
+      "text": "Access to confidential files must be limited to employees whose current job duties require it. Managers must review team access permissions every quarter."
+    }
+  ],
+  "questions": [
+    {
+      "question": "How early should someone ask for vacation?",
+      "relevant_sources": ["leave_request"],
+      "answer_phrases": ["10 calendar days"]
+    },
+    {
+      "question": "How long do we keep a former customer's closed account file?",
+      "relevant_sources": ["record_retention"],
+      "answer_phrases": ["seven years"]
+    },
+    {
+      "question": "By when do I need to turn in a work purchase for repayment?",
+      "relevant_sources": ["expense_reimbursement"],
+      "answer_phrases": ["30 calendar days"]
+    },
+    {
+      "question": "What is the minimum password length?",
+      "relevant_sources": ["password_security"],
+      "answer_phrases": ["14 characters"]
+    },
+    {
+      "question": "When does IT need the laptop back after I leave?",
+      "relevant_sources": ["equipment_return"],
+      "answer_phrases": ["five business days"]
+    },
+    {
+      "question": "What cabin should I choose when booking a work flight?",
+      "relevant_sources": ["travel_booking"],
+      "answer_phrases": ["economy class"]
+    },
+    {
+      "question": "How soon must a suspected breach be escalated?",
+      "relevant_sources": ["incident_reporting"],
+      "answer_phrases": ["within one hour"]
+    },
+    {
+      "question": "How much parental time off can an eligible employee take?",
+      "relevant_sources": ["parental_leave"],
+      "answer_phrases": ["12 weeks"]
+    },
+    {
+      "question": "What is the yearly cap for a job-related certification?",
+      "relevant_sources": ["training_budget"],
+      "answer_phrases": ["1,500 dollars"]
+    },
+    {
+      "question": "When do I need to tell my manager I'm too ill to work?",
+      "relevant_sources": ["sick_leave"],
+      "answer_phrases": ["before 9 a.m."]
+    },
+    {
+      "question": "How often are permissions to private files checked?",
+      "relevant_sources": ["data_access"],
+      "answer_phrases": ["every quarter"]
+    }
+  ]
+}

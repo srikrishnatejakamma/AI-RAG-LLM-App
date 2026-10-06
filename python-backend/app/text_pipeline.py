@@ -64,9 +64,12 @@ def checksum(data: bytes) -> str:
 def embed_local(text: str, dimensions: int = 1536) -> list[float]:
     vector = [0.0] * dimensions
     for token in TOKEN_RE.findall(text.lower()):
-        token_hash = hash(token)
+        token_hash = int.from_bytes(
+            hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest(),
+            byteorder="big",
+        )
         index = token_hash % dimensions
-        vector[index] += -1.0 if (token_hash & 0x100) else 1.0
+        vector[index] += -1.0 if (token_hash & (1 << 63)) else 1.0
     norm = math.sqrt(sum(v * v for v in vector))
     if norm > 0:
         return [v / norm for v in vector]

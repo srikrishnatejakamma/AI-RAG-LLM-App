@@ -77,7 +77,17 @@ $env:RAG_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-The model is downloaded on first use and cached by Hugging Face. This provider uses normalized mean-pooled Transformer embeddings; its vectors are kept in memory with this Python backend's in-memory documents. Keep one model configured for the lifetime of the process, and re-upload documents after changing models. The default `local` provider needs no model download or ML dependencies.
+The model is downloaded on first use and cached by Hugging Face. This provider uses normalized mean-pooled Transformer embeddings; its vectors are kept in memory with this Python backend's in-memory documents. Keep one model configured for the lifetime of the process, and re-upload documents after changing models. The default `local` embedding provider needs no model download; scikit-learn for hybrid retrieval is installed by the standard Python requirements.
+
+### Evaluate Python retrieval
+
+The Python backend includes a small labeled QA set for comparing dense-only retrieval with hybrid retrieval. From `python-backend/`, run:
+
+```powershell
+python evaluation/run_qa_eval.py --provider local --top-k 5
+```
+
+The report includes Recall@k, MRR@k, and nDCG@k for both rankings, plus a basic phrase check for the extractive fallback answer. The starter examples are synthetic; add representative questions and expected source IDs from your own documents before using the scores to choose a production configuration. `--provider transformers` uses the optional Hugging Face setup above; `--provider openai` requires `OPENAI_API_KEY`.
 
 ## Run with PostgreSQL
 
