@@ -261,7 +261,12 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
                 request_id="parser-error",
             )
             self.assertEqual(document.status, "FAILED")
-            self.assertEqual(document.error, "Document processing failed. Check provider settings and retry.")
+            expected_error = (
+                "PDF could not be opened or is damaged"
+                if extension == "pdf"
+                else "Document processing failed. Check provider settings and retry."
+            )
+            self.assertEqual(document.error, expected_error)
 
         self.assertEqual(len(store.audit_events), 2)
         self.assertTrue(all(event.action == "DOCUMENT_INGESTION_FAILED" for event in store.audit_events))

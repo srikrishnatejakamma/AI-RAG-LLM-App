@@ -62,24 +62,39 @@ def _iter_docx_blocks(container: Any) -> Iterator[Paragraph | Table]:
             yield Table(child, container)
 
 
-def parse_pdf_elements(data: bytes) -> list[DocumentElement]:
-    """Extract page-aware PDF text using pypdf's layout-preserving mode."""
-    reader = PdfReader(io.BytesIO(data))
+def _open_pdf(data: bytes) -> PdfReader:
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception as exc:
+        raise ValueError("PDF could not be opened or is damaged") from exc
     if reader.is_encrypted:
         try:
-            if not reader.decrypt(""):
-                raise ValueError("Encrypted PDF cannot be read without its password")
+            decrypted = reader.decrypt("")
         except Exception as exc:
-            if isinstance(exc, ValueError):
-                raise
             raise ValueError("Encrypted PDF cannot be read without its password") from exc
+        if not decrypted:
+            raise ValueError("Encrypted PDF cannot be read without its password")
+    return reader
 
+
+def parse_pdf_elements(data: bytes) -> list[DocumentElement]:
+    """Extract page-aware PDF text using pypdf's layout-preserving mode."""
+    reader = _open_pdf(data)
     elements: list[DocumentElement] = []
     for page_number, page in enumerate(reader.pages, start=1):
         try:
             text = page.extract_text(extraction_mode="layout") or ""
         except (KeyError, TypeError):
             text = page.extract_text() or ""
+        if not text.strip():
+            try:
+                has_images = bool(page.images)
+            except (AttributeError, KeyError, TypeError):
+                has_images = False
+            if has_images:
+                raise ValueError(
+                    f"PDF page {page_number} contains image content without extractable text; OCR is required"
+                )
         for block_index, block in enumerate(_text_blocks(text), start=1):
             elements.append(
                 DocumentElement(
@@ -94,9 +109,7 @@ def parse_pdf_elements(data: bytes) -> list[DocumentElement]:
 
 def parse_pdf_pages(data: bytes) -> list[tuple[int, str]]:
     """Compatibility helper returning one extracted text value per PDF page."""
-    reader = PdfReader(io.BytesIO(data))
-    if reader.is_encrypted and not reader.decrypt(""):
-        raise ValueError("Encrypted PDF cannot be read without its password")
+    reader = _open_pdf(data)
     pages: list[tuple[int, str]] = []
     for page_number, page in enumerate(reader.pages, start=1):
         try:
@@ -250,7 +263,7 @@ def _element_groups(elements: list[DocumentElement]) -> list[tuple[list[Document
         current = []
         current_key = None
 
-    for element_index, element in enumerate(elements):
+    for element in elements:
         text = element.text.strip()
         if not text:
             continue
@@ -296,9 +309,10 @@ def build_chunks(
         # Re-split long structures, then repeat their section breadcrumb so every
         # resulting chunk remains interpretable when retrieved on its own.
         parts = chunk_text(body, chunk_size, overlap)
+        chunk_section_path = () if group_types == ("heading",) else section_path
         for part in parts:
             pending.append((
-                _make_chunk_text(part, section_path), page_number, section_path,
+                _make_chunk_text(part, chunk_section_path), page_number, section_path,
                 group_types, start, end, source_locations,
             ))
 

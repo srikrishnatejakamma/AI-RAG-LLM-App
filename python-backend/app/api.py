@@ -197,6 +197,7 @@ def build_citation(match: tuple[DocumentData, any, float]) -> dict[str, Any]:
         "chunk": chunk.index,
         "page": chunk.page_number,
         "excerpt": excerpt,
+        "sourceLocation": "; ".join(chunk.source_locations) or None,
     }
 
 

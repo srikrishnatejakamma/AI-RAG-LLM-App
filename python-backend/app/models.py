@@ -46,6 +46,7 @@ class Citation(BaseModel):
     chunk: int = Field(ge=1)
     page: int | None = Field(default=None, ge=1)
     excerpt: str
+    source_location: str | None = Field(default=None, alias="sourceLocation")
 
     model_config = ConfigDict(populate_by_name=True)
 
