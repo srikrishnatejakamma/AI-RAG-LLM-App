@@ -70,7 +70,8 @@ class ApiTests(unittest.TestCase):
         csrf = self.client.get("/api/csrf")
 
         self.assertEqual(health.status_code, 200)
-        self.assertEqual(health.json()["status"], "ok")
+        expected_status = "ok" if api.ctx.settings.openai_api_key else "degraded"
+        self.assertEqual(health.json()["status"], expected_status)
         self.assertEqual(csrf.status_code, 200)
         self.assertEqual(csrf.json()["headerName"], "X-XSRF-TOKEN")
         self.assertTrue(csrf.json()["token"])
@@ -306,7 +307,7 @@ class ApiTests(unittest.TestCase):
 
         response = self.client.post(f"/api/collections/{collection['id']}/chat", json={"question": question}, headers=self.write_headers())
 
-        self.assertFalse(response.json()["grounded"])
+        self.assertFalse(response.json()["grounded"], response.json())
         self.assertEqual(response.json()["sources"], [])
 
     def test_chat_returns_grounded_answer_and_bounded_citation(self):
@@ -323,6 +324,44 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(response.json()["grounded"])
         self.assertEqual(response.json()["sources"][0]["page"], 7)
         self.assertLessEqual(len(response.json()["sources"][0]["excerpt"]), 220)
+
+    def test_chat_retries_extractive_search_over_collection_when_retrieval_misses_evidence(self):
+        self.login()
+        collection = self.client.post("/api/collections", json={"name": "Research"}, headers=self.write_headers()).json()
+        missed = ChunkData("The office is near the river and has a garden.", 1, 1, embed_local("unrelated"))
+        relevant = ChunkData("The retention policy requires teams to review records every year.", 2, 2, embed_local("retention policy"))
+        document = DocumentData("doc", "policy.txt", "sum", api.utc_now(), "READY", None)
+        document.chunks = [missed, relevant]
+        api.ctx.store.collections[collection["id"]].documents[document.id] = document
+
+        with patch.object(api.ctx.retriever, "retrieve", return_value=[(document, missed, 0.5)]):
+            response = self.client.post(
+                f"/api/collections/{collection['id']}/chat",
+                json={"question": "retention policy"},
+                headers=self.write_headers(),
+            )
+
+        self.assertTrue(response.json()["grounded"])
+        self.assertIn("review records every year", response.json()["answer"])
+        self.assertEqual([source["chunk"] for source in response.json()["sources"]], [2])
+
+    def test_chat_does_not_attach_irrelevant_citations_to_an_unanswered_question(self):
+        self.login()
+        collection = self.client.post("/api/collections", json={"name": "Research"}, headers=self.write_headers()).json()
+        chunk = ChunkData("The office is near the river and has a garden.", 1, 1, embed_local("retention policy"))
+        document = DocumentData("doc", "unrelated.txt", "sum", api.utc_now(), "READY", None)
+        document.chunks = [chunk]
+        api.ctx.store.collections[collection["id"]].documents[document.id] = document
+
+        with patch.object(api.ctx.retriever, "retrieve", return_value=[(document, chunk, 0.5)]):
+            response = self.client.post(
+                f"/api/collections/{collection['id']}/chat",
+                json={"question": "retention policy"},
+                headers=self.write_headers(),
+            )
+
+        self.assertFalse(response.json()["grounded"], response.json())
+        self.assertEqual(response.json()["sources"], [])
 
     def test_unexpected_chat_failure_hides_internal_error_details(self):
         self.login()

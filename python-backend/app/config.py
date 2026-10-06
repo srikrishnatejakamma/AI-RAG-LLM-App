@@ -39,7 +39,7 @@ class Settings:
     text_encoding: str = os.getenv("RAG_TEXT_ENCODING", "auto").strip()
     answer_provider: str = os.getenv("RAG_ANSWER_PROVIDER", "auto").lower()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     openai_chat_model: str = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
     openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     openai_vector_store_id: str = os.getenv("OPENAI_VECTOR_STORE_ID", "")
@@ -79,12 +79,18 @@ class Settings:
         }
 
     def answer_provider_health(self) -> dict[str, str]:
-        provider = self.answer_provider if self.answer_provider in {"auto", "spring-ai", "legacy"} else "invalid"
+        provider = self.answer_provider if self.answer_provider in {"auto", "spring-ai", "legacy", "extractive"} else "invalid"
         if provider == "invalid":
             return {
                 "answerProvider": provider,
                 "answerProviderStatus": "degraded",
-                "answerProviderMessage": "RAG_ANSWER_PROVIDER must be auto, spring-ai, or legacy.",
+                "answerProviderMessage": "RAG_ANSWER_PROVIDER must be auto, spring-ai, legacy, or extractive.",
+            }
+        if provider == "extractive":
+            return {
+                "answerProvider": provider,
+                "answerProviderStatus": "degraded",
+                "answerProviderMessage": "Extractive-only answers are enabled; model generation is disabled.",
             }
         if not self.openai_api_key:
             return {

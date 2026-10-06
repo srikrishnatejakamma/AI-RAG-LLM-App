@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+import calendar
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -213,6 +214,15 @@ def extractive_answer(
         centrality = similarities.sum(axis=1) / max(1, len(candidates) - 1)
         sentence_information = np.asarray(word_matrix.multiply(word_vectorizer.idf_).sum(axis=1)).ravel()
         centrality = centrality * (1.0 + sentence_information / max(1, word_matrix.shape[1]))
+        substantial = [
+            idx for idx, sentence in enumerate(candidates)
+            if len(sentence) >= 45 and not re.search(r"\[[^\]]+\]", sentence)
+        ]
+        # Template values are not factual summary content. When the document
+        # has enough complete prose, summarize that prose and report templates
+        # separately instead of presenting placeholder values as policy.
+        if len(substantial) >= 2:
+            centrality[[idx for idx in range(len(candidates)) if idx not in substantial]] = -1.0
         prior_lines = {
             normalize_text(re.sub(r"^[\s\u2022*-]+", "", line)).casefold()
             for line in (previous_answer or "").splitlines()
@@ -220,9 +230,11 @@ def extractive_answer(
         }
         primary_sections = sum(1 for _, _, depth in section_rows if depth == 0)
         summary_size = primary_sections if primary_sections else len(candidates)
-        excerpt_limit = max(1, int(np.ceil(np.log2(summary_size + 1))))
-        remaining = [idx for idx, sentence in enumerate(candidates) if not any(
-            sentence.casefold() in prior or prior in sentence.casefold() for prior in prior_lines
+        excerpt_limit = max(1, min(6, int(np.ceil(np.log2(summary_size + 1))) + 1))
+        candidate_pool = substantial if len(substantial) >= 2 else list(range(len(candidates)))
+        remaining = [idx for idx in candidate_pool if not any(
+            candidates[idx].casefold() in prior or prior in candidates[idx].casefold()
+            for prior in prior_lines
         )]
         while remaining and len(selected) < excerpt_limit:
             best_idx = max(
@@ -302,9 +314,82 @@ def extractive_answer(
     if not selected:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
     answer = "Based on the document:\n\n\u2022 " + "\n\n\u2022 ".join(selected)
-    if any(re.search(r"\[[^\]]+\]", sentence) for sentence in selected):
+    if overview and any(re.search(r"\[[^\]]+\]", passage) for passage in (section_context or passages)):
+        answer = "Some source values are still placeholders.\n\n" + answer
+    elif any(re.search(r"\[[^\]]+\]", sentence) for sentence in selected):
         answer = "The document contains unfilled values in brackets.\n\n" + answer
     return answer
+
+
+def extract_temporal_facts(question: str, passages: list[str], limit: int = 15) -> list[tuple[str, int]]:
+    """Find document sentences that contain parsed dates or time quantities.
+
+    Calendar names come from Python's calendar module. Numeric dates and
+    durations are recognized from the document text, and passage indexes are
+    retained so callers can cite the exact source chunks.
+    """
+    if not re.search(r"\b(?:date|dates|deadline|deadlines|due|when|schedule|timeline|timeframe|expiry|expires?)\b", question, re.IGNORECASE):
+        return []
+    month_terms = {
+        value.casefold()
+        for value in (*calendar.month_name, *calendar.month_abbr)
+        if value
+    }
+    weekday_terms = {
+        value.casefold()
+        for value in (*calendar.day_name, *calendar.day_abbr)
+        if value
+    }
+    month_pattern = "|".join(
+        re.escape(value)
+        for value in sorted(month_terms, key=len, reverse=True)
+    )
+    weekday_pattern = "|".join(re.escape(value) for value in sorted(weekday_terms, key=len, reverse=True))
+    number_words = (
+        "a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+        "thirty|forty|fifty|sixty|ninety|hundred|half"
+    )
+    time_units = "seconds?|minutes?|hours?|days?|weeks?|fortnights?|months?|quarters?|years?"
+    date_patterns = (
+        rf"\b\d{{1,4}}[./-]\d{{1,2}}(?:[./-]\d{{1,4}})?\b",
+        rf"\b(?:{month_pattern})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?\b",
+        rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:{month_pattern})(?:\s+\d{{4}})?\b",
+        rf"\b(?:{month_pattern})\s+\d{{4}}\b",
+        rf"\b(?:\[\s*)?(?:\d+|{number_words})\s+(?:{time_units})\b(?:\s*\])?",
+        rf"\b(?:within|by|after|before|in|for|every|each|at\s+least|no\s+later\s+than)\s+(?:\[\s*)?(?:\d+|{number_words})\s+(?:{time_units})\b(?:\s*\])?",
+        r"\b(?:end|beginning|start|middle)\s+of\s+(?:the\s+)?(?:day|week|month|quarter|year)\b",
+        rf"\b(?:next|this|last)\s+(?:{month_pattern}|{weekday_pattern})\b",
+    )
+    temporal_expression = re.compile("|".join(f"(?:{pattern})" for pattern in date_patterns), re.IGNORECASE)
+    facts: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for passage_index, passage in enumerate(passages):
+        content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
+        # Work on lines as well as complete sentences: PDF extraction often
+        # leaves date-bearing list items without terminal punctuation.
+        parts: list[str] = []
+        for line in content.splitlines():
+            line = normalize_text(line).strip(" \u2022\u25a0\u25aa\u25cf*-\t")
+            if not line:
+                continue
+            parts.extend(_extract_sentences(line, []))
+            if not re.search(r"[.!?][\])'\u2019\"]*$", line) and len(line) >= 18:
+                parts.append(line)
+        for part in parts:
+            normalized = normalize_text(part)
+            if len(normalized) < 18:
+                continue
+            if not temporal_expression.search(normalized):
+                continue
+            key = normalize_text(normalized).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append((normalized, passage_index))
+            if len(facts) >= limit:
+                return facts
+    return facts
 
 
 def _extract_sentences(passage: str, section_titles: list[str]) -> list[str]:
@@ -411,7 +496,10 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     # vocabulary and query form rather than keeping a fixed intent phrase list.
     is_non_interrogative = not question.rstrip().endswith("?")
     if query.nnz == 0:
-        return len(terms) >= 2 and is_non_interrogative
+        # A short standalone phrase is usually a specific topic, not a request
+        # to summarize. Requiring several unmatched content terms keeps queries
+        # such as "retention policy" from being answered with a random overview.
+        return len(terms) >= 3 and is_non_interrogative
     matched_idf = vectorizer.idf_[query.indices]
     # Use the active collection's information distribution to distinguish a
     # collection-level request from one anchored by a distinctive document term.

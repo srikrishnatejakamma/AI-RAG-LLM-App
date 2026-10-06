@@ -9,6 +9,7 @@ from app.ai import (
     contextualize_question,
     correct_query_spelling,
     extractive_answer,
+    extract_temporal_facts,
     is_collection_overview,
 )
 from app.config import Settings
@@ -16,6 +17,25 @@ from app.models import ReadSourceToolArgs
 
 
 class AiTests(unittest.TestCase):
+    def test_temporal_request_collects_dates_and_periods_across_passages(self):
+        passages = [
+            "[handbook.pdf, chunk 1, page 4]\nSubmit your request by March 15, 2026.",
+            "[handbook.pdf, chunk 2, page 8]\nPlease give at least [two weeks] notice before resigning.",
+            "[handbook.pdf, chunk 3, page 12]\nEmployees should keep their contact information current.",
+        ]
+
+        facts = extract_temporal_facts("Find important dates and deadlines", passages)
+
+        self.assertEqual(len(facts), 2)
+        self.assertIn("March 15, 2026", facts[0][0])
+        self.assertIn("two weeks", facts[1][0])
+        self.assertEqual([index for _, index in facts], [0, 1])
+
+    def test_temporal_extraction_does_not_run_for_non_temporal_requests(self):
+        passages = ["[handbook.pdf, page 1] Submit your request by March 15, 2026."]
+
+        self.assertEqual(extract_temporal_facts("Summarize this document", passages), [])
+
     def test_extractive_answer_selects_relevant_evidence(self):
         answer = extractive_answer(
             "What is the retention policy?",
@@ -37,6 +57,21 @@ class AiTests(unittest.TestCase):
 
         self.assertIn("Teams review records annually", answer)
         self.assertIn("Managers approve retention exceptions", answer)
+
+    def test_overview_does_not_present_unfilled_template_values_as_facts(self):
+        answer = extractive_answer(
+            "Summarize the key points",
+            [
+                "[handbook.txt] Full-time employees work at least [30 hours] per week on average. "
+                "Managers must review team access permissions every quarter. "
+                "Employees must report suspected security incidents to the security team promptly."
+            ],
+            overview=True,
+        )
+
+        self.assertIn("placeholders", answer)
+        self.assertNotIn("[30 hours]", answer)
+        self.assertIn("review team access permissions", answer)
 
     def test_policy_overview_summarizes_evidence_and_skips_intro_boilerplate(self):
         answer = extractive_answer(
@@ -111,6 +146,9 @@ the day you join our company.
         ]
 
         self.assertFalse(is_collection_overview("Annual Leave", passages))
+
+    def test_unmatched_two_word_topic_is_not_misclassified_as_a_summary(self):
+        self.assertFalse(is_collection_overview("retention policy", ["The office is near the river and has a garden."]))
 
     def test_extractive_answer_reports_no_supporting_evidence(self):
         answer = extractive_answer("What is the retention policy?", ["[office.txt] The office is near the river."])
@@ -228,6 +266,13 @@ the day you join our company.
         agent = OpenAIAgentOrchestrator(Settings(admin_password="secret", openai_api_key="configured", answer_provider="invalid"))
 
         self.assertFalse(agent.available())
+
+    def test_extractive_answer_provider_disables_unfunded_remote_calls(self):
+        settings = Settings(admin_password="secret", openai_api_key="configured", answer_provider="extractive")
+        agent = OpenAIAgentOrchestrator(settings)
+
+        self.assertFalse(agent.available())
+        self.assertEqual(settings.answer_provider_health()["answerProvider"], "extractive")
 
 
 if __name__ == "__main__":

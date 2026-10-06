@@ -28,14 +28,17 @@ class SettingsTests(unittest.TestCase):
 
     def test_answer_provider_health_reports_invalid_missing_key_and_configured_key(self):
         invalid = Settings(admin_password="secret", answer_provider="custom").answer_provider_health()
-        no_key = Settings(admin_password="secret", answer_provider="legacy").answer_provider_health()
+        no_key = Settings(admin_password="secret", answer_provider="legacy", openai_api_key="").answer_provider_health()
         configured = Settings(admin_password="secret", answer_provider="spring-ai", openai_api_key="key").answer_provider_health()
 
         self.assertEqual(invalid["answerProviderStatus"], "degraded")
-        self.assertIn("must be auto, spring-ai, or legacy", invalid["answerProviderMessage"])
+        self.assertIn("must be auto, spring-ai, legacy, or extractive", invalid["answerProviderMessage"])
         self.assertEqual(no_key["answerProviderStatus"], "degraded")
         self.assertIn("extractive fallback", no_key["answerProviderMessage"])
         self.assertEqual(configured["answerProviderStatus"], "ok")
+
+        extractive = Settings(admin_password="secret", answer_provider="extractive").answer_provider_health()
+        self.assertEqual(extractive["answerProviderStatus"], "degraded")
 
 
 class MemoryStoreTests(unittest.IsolatedAsyncioTestCase):

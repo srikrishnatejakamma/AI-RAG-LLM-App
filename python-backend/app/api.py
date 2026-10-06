@@ -17,6 +17,7 @@ from .ai import (
     contextualize_question,
     correct_query_spelling,
     extractive_answer,
+    extract_temporal_facts,
     is_collection_overview,
 )
 from .config import Settings
@@ -26,7 +27,7 @@ from .ingestion import ingest_document
 from .models import AuditPage, ChatRequest, ChatResponse, CollectionView, CreateCollectionRequest, CsrfView, DocumentView, HealthView, SessionView
 from .retrieval import HybridRetriever
 from .store import MemoryStore
-from .text_pipeline import checksum
+from .text_pipeline import checksum, normalize_text
 
 
 log = logging.getLogger("python-rag-backend")
@@ -501,6 +502,15 @@ async def chat(
     continuation = contextual_question != standalone_question
     contextual_question = correct_query_spelling(contextual_question, collection_text)
     broad_summary = is_collection_overview(contextual_question, collection_context)
+    temporal_facts = extract_temporal_facts(contextual_question, collection_context)
+    if temporal_facts:
+        answer = "Important dates and time periods found in the documents:\n\n" + "\n\n".join(
+            f"• {sentence}" for sentence, _ in temporal_facts
+        )
+        source_indexes = list(dict.fromkeys(index for _, index in temporal_facts))
+        citations = [build_citation((ready_chunks[index][0], ready_chunks[index][1], 0.0)) for index in source_indexes]
+        await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")
+        return {"answer": answer, "sources": citations, "grounded": True}
     if ctx.settings.retrieval_provider == "openai-file-search":
         if not ctx.file_search.available:
             raise HTTPException(status_code=503, detail={"error": "Hosted File Search is not configured"})
@@ -574,7 +584,39 @@ async def chat(
             section_context=collection_context,
         )
 
+    no_evidence = "I don't have enough information in the retrieved passages" in answer
+    if no_evidence and not broad_summary:
+        # Retrieval can miss a relevant chunk even when its evidence is in this
+        # collection. Retry extraction over the indexed collection before
+        # returning an unsupported-answer response.
+        collection_answer = extractive_answer(
+            contextual_question,
+            collection_context,
+            previous_answer if continuation else None,
+            overview=False,
+            section_context=collection_context,
+        )
+        if "I don't have enough information in the retrieved passages" not in collection_answer:
+            answer = collection_answer
+            cited_sentences = [
+                normalize_text(line.lstrip("\u2022*- ")).casefold()
+                for line in answer.splitlines()
+                if line.lstrip().startswith(("\u2022", "-", "*"))
+            ]
+            recovered_matches = []
+            for index, (document, chunk) in enumerate(ready_chunks):
+                text = normalize_text(chunk.text).casefold()
+                if any(sentence and sentence in text for sentence in cited_sentences):
+                    recovered_matches.append((document, chunk, 0.0))
+            if recovered_matches:
+                matches = recovered_matches[: ctx.settings.retrieval_top_k]
+            else:
+                answer = "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
+
     citations = [build_citation(m) for m in matches]
+    if "I don't have enough information in the retrieved passages" in answer:
+        await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "NO_EVIDENCE", "")
+        return {"answer": answer, "sources": [], "grounded": False}
     await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")
     return {"answer": answer, "sources": citations, "grounded": True}
 
