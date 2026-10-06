@@ -136,8 +136,8 @@ def extractive_answer(
         previous = (previous_answer or "").casefold()
         selected = [section for section in sections if section[0].casefold() not in previous]
         if not selected:
-            return "No additional document sections remain beyond those already listed."
-        return "Document sections found in this collection:\n\n" + "\n".join(
+            return "I’ve covered the top-level sections identified in the document. Ask about one of them for its policy details."
+        return "Main document sections:\n\n" + "\n".join(
             f"- {title} (page {page})" if page else f"- {title}"
             for title, page in selected
         )
@@ -283,12 +283,14 @@ def correct_query_spelling(question: str, passages: list[str]) -> str:
 
 
 def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
-    # A page's TOC-like rows are identified from its own layout evidence. This
-    # filters body sentences that happen to end in a number without assuming a
-    # handbook format or a fixed list of section names.
-    candidates: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    # A page's TOC-like rows are identified from its own layout evidence. Keep
+    # only rows at the shallowest indentation level in the detected TOC pages;
+    # if extraction provides no hierarchy, let the answerer summarize content.
+    candidates: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
     for passage in passages:
         source = re.match(r"^\[([^,\]]+).*?page\s+(\d+)\]\s*", passage, re.IGNORECASE)
+        if not source:
+            continue
         document = source.group(1) if source else ""
         source_page = source.group(2) if source else ""
         content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
@@ -296,34 +298,37 @@ def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
             match = re.match(r"^\s*(.*?)\s+(\d+)\s*$", line)
             if not match:
                 continue
+            indentation = len(re.match(r"^[ \t]*", line).group(0))
             title = normalize_text(match.group(1).strip(" .\u2022-*\t"))
             page = match.group(2)
             if not title or not TOKEN_RE.search(title):
                 continue
-            candidates.setdefault((document, source_page), []).append((title, page))
+            candidates.setdefault((document, source_page), []).append((title, page, indentation))
 
+    by_document: dict[str, list[tuple[str, list[tuple[str, str, int]]]]] = {}
+    for (document, source_page), rows in candidates.items():
+        by_document.setdefault(document, []).append((source_page, rows))
     sections: list[tuple[str, str]] = []
     seen_titles: set[str] = set()
-    by_document: dict[str, list[tuple[str, str, list[tuple[str, str]]]]] = {}
-    for (document, source_page), rows in candidates.items():
-        by_document.setdefault(document, []).append((source_page, document, rows))
     for pages in by_document.values():
-        counts = [len(rows) for _, _, rows in pages]
+        counts = [len(rows) for _, rows in pages]
         if not counts:
             continue
         # Relative density keeps the threshold tied to each document's own
         # extracted layout, including shorter documents with fewer TOC rows.
         peak = max(counts)
         minimum_density = max(3, int(peak * 0.35))
-        for _, _, rows in pages:
-            if len(rows) < minimum_density:
+        all_rows = [row for _, rows in pages if len(rows) >= minimum_density for row in rows]
+        indentation_levels = sorted({indentation for _, _, indentation in all_rows})
+        if len(indentation_levels) < 2:
+            continue
+        shallowest = indentation_levels[0]
+        for title, page, indentation in all_rows:
+            key = title.casefold()
+            if indentation != shallowest or key in seen_titles:
                 continue
-            for title, page in rows:
-                key = title.casefold()
-                if key in seen_titles:
-                    continue
-                sections.append((title, page))
-                seen_titles.add(key)
+            sections.append((title, page))
+            seen_titles.add(key)
     return sections
 
 

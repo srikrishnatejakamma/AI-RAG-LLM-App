@@ -13,9 +13,14 @@ def normalize_text(text: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    # Keep source line boundaries so section titles remain distinguishable after indexing.
-    normalized = re.sub(r"[ \t\r\f\v]+", " ", text)
-    normalized = re.sub(r" *\n *", "\n", normalized).strip()
+    # Preserve line indentation from layout-aware PDF extraction so downstream
+    # section parsing can recover the document's own heading hierarchy.
+    lines = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        indentation = re.match(r"^[ \t]*", line).group(0)
+        content = re.sub(r"[ \t\f\v]+", " ", line[len(indentation) :].rstrip())
+        lines.append(indentation + content)
+    normalized = "\n".join(lines).strip("\n")
     if not normalized:
         return []
     if chunk_size < 1:
