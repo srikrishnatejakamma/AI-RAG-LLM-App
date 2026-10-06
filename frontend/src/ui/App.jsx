@@ -180,7 +180,8 @@ function App() {
     const collectionId = selected.id;
     setQuestion(''); setMessages((current) => [...current, { role: 'user', text: prompt }]); setBusy(true); setError('');
     try {
-      const answer = await api(`/collections/${collectionId}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt }) });
+      const history = messages.slice(-8).map(({ role, text }) => ({ role, text }));
+      const answer = await api(`/collections/${collectionId}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt, history }) });
       if (selectedIdRef.current === collectionId) {
         setMessages((current) => [...current, { role: 'assistant', text: answer.answer, citations: answer.citations || answer.sources || [], grounded: answer.grounded }]);
       }

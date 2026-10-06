@@ -10,8 +10,14 @@ class CreateCollectionRequest(BaseModel):
     name: str
 
 
+class ChatHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(max_length=4000)
+
+
 class ChatRequest(BaseModel):
     question: str
+    history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=8)
 
 
 class CollectionView(BaseModel):

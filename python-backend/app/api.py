@@ -457,13 +457,24 @@ async def chat(
     if len(question) > 2000:
         raise HTTPException(status_code=400, detail={"error": "Question must be 2,000 characters or fewer"})
 
-    broad_policy_list = bool(re.search(r"\b(?:main|full|key|major|primary|all|list)\b.{0,32}\bpolic(?:y|ies)\b|\bpolic(?:y|ies)\b.{0,32}\b(?:main|full|key|major|primary|all|list)\b", question, re.IGNORECASE))
-    broad_summary = broad_policy_list or bool(re.search(r"\b(?:summari[sz]e|overview|highlights?)\b|\b(?:key|main)\s+points?\b", question, re.IGNORECASE))
+    history = payload.history[-8:]
+    previous_user = next((item.text for item in reversed(history) if item.role == "user"), "")
+    previous_answer = next((item.text for item in reversed(history) if item.role == "assistant"), "")
+    contextual_question = question
+    if previous_user and re.fullmatch(r"(?:more|tell me more|go on|continue|elaborate|expand(?: on that)?|explain further)[.!?\s]*", question, re.IGNORECASE):
+        prior_was_summary = bool(re.search(r"\b(?:summari[sz]e|overview|highlights?|key\s+points?|main\s+polic(?:y|ies))\b", previous_user, re.IGNORECASE))
+        contextual_question = (
+            previous_user + ". Continue with additional distinct key points."
+            if prior_was_summary else previous_user + ". Please explain further."
+        )
+
+    broad_policy_list = bool(re.search(r"\b(?:main|full|key|major|primary|all|list)\b.{0,32}\bpolic(?:y|ies)\b|\bpolic(?:y|ies)\b.{0,32}\b(?:main|full|key|major|primary|all|list)\b", contextual_question, re.IGNORECASE))
+    broad_summary = broad_policy_list or bool(re.search(r"\b(?:summari[sz]e|overview|highlights?)\b|\b(?:key|main)\s+points?\b", contextual_question, re.IGNORECASE))
     if ctx.settings.retrieval_provider == "openai-file-search":
         if not ctx.file_search.available:
             raise HTTPException(status_code=503, detail={"error": "Hosted File Search is not configured"})
         try:
-            answer, file_results = await asyncio.to_thread(ctx.file_search.answer, question, collection_id, 20 if broad_summary else ctx.settings.retrieval_top_k)
+            answer, file_results = await asyncio.to_thread(ctx.file_search.answer, contextual_question, collection_id, 20 if broad_summary else ctx.settings.retrieval_top_k)
         except Exception as exc:
             log.warning("Hosted file search failed: %s", exc)
             raise HTTPException(status_code=502, detail={"error": "Hosted document search is temporarily unavailable"}) from exc
@@ -484,7 +495,7 @@ async def chat(
         await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")
         return {"answer": answer, "sources": citations, "grounded": True}
 
-    query_vec = await asyncio.to_thread(ctx.embedding_service.embed, question)
+    query_vec = await asyncio.to_thread(ctx.embedding_service.embed, contextual_question)
     ready_chunks = tuple(
         (document, chunk)
         for document in collection.documents.values()
@@ -496,11 +507,13 @@ async def chat(
         collection.id,
         ready_chunks,
         query_vec,
-        question,
+        contextual_question,
         max(ctx.settings.retrieval_top_k, 20) if broad_summary else ctx.settings.retrieval_top_k,
         ctx.settings.minimum_score,
     )
 
+    if not matches and broad_summary and ready_chunks:
+        matches = [(document, chunk, 0.0) for document, chunk in ready_chunks[: ctx.settings.retrieval_top_k]]
     if not matches:
         processing = any(doc.status == "PROCESSING" for doc in collection.documents.values())
         message = "Documents are still being processed. Try again in a moment." if processing else "I couldn't find enough information in this collection to answer that."
@@ -512,15 +525,25 @@ async def chat(
         page_info = f", page {chunk.page_number}" if chunk.page_number is not None else ""
         context.append(f"[{doc.name}, chunk {chunk.index}{page_info}]\n{chunk.text}")
 
+    fallback_context = context
+    if broad_summary:
+        fallback_context = []
+        for document in collection.documents.values():
+            if document.status != "READY":
+                continue
+            for chunk in document.chunks:
+                page_info = f", page {chunk.page_number}" if chunk.page_number is not None else ""
+                fallback_context.append(f"[{document.name}, chunk {chunk.index}{page_info}]\n{chunk.text}")
+
     answer = ""
     if ctx.agent.available():
         try:
-            answer = ctx.agent.answer(question, context)
+            answer = ctx.agent.answer(contextual_question, context)
         except Exception as exc:
             log.warning("OpenAI agent failed, using fallback: %s", exc)
-            answer = extractive_answer(question, context)
+            answer = extractive_answer(contextual_question, fallback_context, previous_answer or None)
     else:
-        answer = extractive_answer(question, context)
+        answer = extractive_answer(contextual_question, fallback_context, previous_answer or None)
 
     citations = [build_citation(m) for m in matches]
     await ctx.store.record_audit(username, "QUESTION_ANSWERED", "collection", collection_id, "GROUNDED", "")

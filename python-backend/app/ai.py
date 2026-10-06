@@ -124,11 +124,13 @@ class EmbeddingService:
 def extractive_answer(
     question: str,
     passages: list[str],
+    previous_answer: str | None = None,
 ) -> str:
     summary_intent = bool(re.search(
-        r"\b(?:summari[sz]e|key\s+points?|highlights?|overview|main\s+points?|list\s+the)\b",
-        question,
-        re.IGNORECASE,
+        r"\b(?:summari[sz]e|key\s+points?|highlights?|overview|main\s+points?|list\s+the)\b|"
+        r"\b(?:main|key|all|list)\b.{0,32}\bpolic(?:y|ies)\b|"
+        r"\bpolic(?:y|ies)\b.{0,32}\b(?:main|key|all|list)\b",
+        question, re.IGNORECASE,
     ))
     candidates: list[str] = []
     for passage in passages:
@@ -137,37 +139,58 @@ def extractive_answer(
             cleaned = normalize_text(sentence)
             if len(cleaned) < 24:
                 continue
-            # Ignore source templates whose fill-in field has not been completed.
-            if re.search(r"\[[^\]]*(?:/|insert|your\s+company|enter\s+)", cleaned, re.IGNORECASE):
+            # Omit unresolved fill-in values so template alternatives are not presented as policy.
+            if re.search(r"\[[^\]]+\]", cleaned):
                 continue
             candidates.append(cleaned)
     if not candidates:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
 
-    query_and_sentences = [question, *candidates]
     word_vectorizer = TfidfVectorizer(lowercase=True, strip_accents="unicode", ngram_range=(1, 2), sublinear_tf=True)
     char_vectorizer = TfidfVectorizer(analyzer="char_wb", lowercase=True, strip_accents="unicode", ngram_range=(3, 5), sublinear_tf=True)
-    word_matrix = word_vectorizer.fit_transform(query_and_sentences)
-    char_matrix = char_vectorizer.fit_transform(query_and_sentences)
-    word_scores = cosine_similarity(word_matrix[1:], word_matrix[0]).ravel()
-    char_scores = cosine_similarity(char_matrix[1:], char_matrix[0]).ravel()
-    ranked: list[tuple[float, int, str]] = []
-    for idx, sentence in enumerate(candidates):
-        lexical = 0.65 * float(word_scores[idx]) + 0.35 * float(char_scores[idx])
-        if lexical > 0.015:
-            ranked.append((lexical, idx, sentence))
-    ranked.sort(key=lambda row: (-row[0], row[1]))
-
+    word_matrix = word_vectorizer.fit_transform(candidates)
+    char_matrix = char_vectorizer.fit_transform([question, *candidates])
     selected: list[str] = []
     selected_indexes: list[int] = []
-    excerpt_limit = 6 if summary_intent else 3
-    for _, idx, sentence in ranked:
-        if any(float(cosine_similarity(char_matrix[idx + 1], char_matrix[prior + 1])[0, 0]) >= 0.86 for prior in selected_indexes):
-            continue
-        selected.append(sentence if len(sentence) <= 320 else sentence[:317] + "\u2026")
-        selected_indexes.append(idx)
-        if len(selected) == excerpt_limit:
-            break
+    if summary_intent:
+        similarities = cosine_similarity(word_matrix)
+        centrality = similarities.sum(axis=1) / max(1, len(candidates) - 1)
+        prior_lines = {
+            normalize_text(re.sub(r"^[\s\u2022*-]+", "", line)).casefold()
+            for line in (previous_answer or "").splitlines()
+            if len(line.strip()) > 24
+        }
+        excerpt_limit = 8
+        remaining = [idx for idx, sentence in enumerate(candidates) if not any(
+            sentence.casefold() in prior or prior in sentence.casefold() for prior in prior_lines
+        )]
+        while remaining and len(selected) < excerpt_limit:
+            best_idx = max(
+                remaining,
+                key=lambda idx: float(centrality[idx]) - 0.35 * max(
+                    (float(similarities[idx, chosen]) for chosen in selected_indexes), default=0.0
+                ),
+            )
+            selected.append(candidates[best_idx] if len(candidates[best_idx]) <= 320 else candidates[best_idx][:317] + "\u2026")
+            selected_indexes.append(best_idx)
+            remaining.remove(best_idx)
+    else:
+        char_scores = cosine_similarity(char_matrix[1:], char_matrix[0]).ravel()
+        word_scores = cosine_similarity(word_matrix, word_vectorizer.transform([question])).ravel()
+        ranked = sorted(
+            ((0.65 * float(word_scores[idx]) + 0.35 * float(char_scores[idx]), idx) for idx in range(len(candidates))),
+            key=lambda item: (-item[0], item[1]),
+        )
+        for score, idx in ranked:
+            if score <= 0.015:
+                break
+            if any(float(cosine_similarity(char_matrix[idx + 1], char_matrix[prior + 1])[0, 0]) >= 0.86 for prior in selected_indexes):
+                continue
+            sentence = candidates[idx]
+            selected.append(sentence if len(sentence) <= 320 else sentence[:317] + "\u2026")
+            selected_indexes.append(idx)
+            if len(selected) == 3:
+                break
     if not selected:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
     return "Based on the document:\n\n\u2022 " + "\n\n\u2022 ".join(selected)
