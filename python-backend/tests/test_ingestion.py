@@ -45,9 +45,11 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         expected = "caf\u00e9"
         self.assertEqual(parse_txt_text(expected.encode("utf-8")), expected)
 
-    def test_parse_txt_text_falls_back_to_utf16_and_latin1(self):
+    def test_parse_txt_text_falls_back_to_utf16_and_requires_legacy_encoding_choice(self):
         self.assertEqual(parse_txt_text("hello".encode("utf-16")), "hello")
-        self.assertEqual(parse_txt_text(b"caf\xe9"), "caf\u00e9")
+        with self.assertRaisesRegex(ValueError, "encoding is uncertain"):
+            parse_txt_text(b"caf\xe9")
+        self.assertEqual(parse_txt_text(b"caf\xe9", encoding="latin1"), "caf\u00e9")
 
     def test_parse_txt_text_decodes_utf32_before_utf16(self):
         self.assertEqual(parse_txt_text("hello".encode("utf-32")), "hello")

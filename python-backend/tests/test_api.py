@@ -31,6 +31,7 @@ class ApiTests(unittest.TestCase):
             chunk_size=200,
             chunk_overlap=20,
             embedding_provider="local",
+            document_parser_provider="native",
             answer_provider="auto",
             openai_api_key="",
         )

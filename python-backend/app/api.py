@@ -409,6 +409,12 @@ async def upload_document(
                 "",
                 embed_many=ctx.embedding_service.embed_many,
                 file_search=ctx.file_search if ctx.settings.retrieval_provider == "openai-file-search" else None,
+                parser_provider=ctx.settings.document_parser_provider,
+                ocr_enabled=ctx.settings.document_ocr_enabled,
+                ocr_engine=ctx.settings.document_ocr_engine,
+                ocr_languages=ctx.settings.document_ocr_languages,
+                max_pages=ctx.settings.document_max_pages,
+                text_encoding=ctx.settings.text_encoding,
             )
         )
     except Exception:

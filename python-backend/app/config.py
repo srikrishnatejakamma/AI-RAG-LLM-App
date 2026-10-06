@@ -19,6 +19,16 @@ class Settings:
     embedding_provider: str = os.getenv("RAG_EMBEDDING_PROVIDER", "local").lower()
     embedding_model: str = os.getenv("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     retrieval_provider: str = os.getenv("RAG_RETRIEVAL_PROVIDER", "local").lower()
+    document_parser_provider: str = os.getenv("RAG_DOCUMENT_PARSER", "auto").lower()
+    document_ocr_enabled: bool = os.getenv("RAG_DOCUMENT_OCR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    document_ocr_engine: str = os.getenv("RAG_DOCUMENT_OCR_ENGINE", "rapidocr").strip().lower()
+    document_ocr_languages: tuple[str, ...] = tuple(
+        language.strip()
+        for language in os.getenv("RAG_DOCUMENT_OCR_LANGUAGES", "iso:en").split(",")
+        if language.strip()
+    )
+    document_max_pages: int = max(1, int(os.getenv("RAG_DOCUMENT_MAX_PAGES", "300")))
+    text_encoding: str = os.getenv("RAG_TEXT_ENCODING", "auto").strip()
     answer_provider: str = os.getenv("RAG_ANSWER_PROVIDER", "auto").lower()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")

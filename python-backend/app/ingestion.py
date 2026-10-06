@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import threading
 import re
+import os
+from functools import lru_cache
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator
 
@@ -20,6 +23,7 @@ from .text_pipeline import chunk_text, embed_local
 
 
 log = logging.getLogger("python-rag-backend")
+_docling_conversion_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -201,15 +205,21 @@ def _text_blocks(text: str) -> list[str]:
     return [re.sub(r"[ \t]+", " ", block).strip() for block in re.split(r"\n\s*\n", normalized) if block.strip()]
 
 
-def parse_txt_elements(data: bytes) -> list[DocumentElement]:
-    text = parse_txt_text(data)
+def parse_txt_elements(data: bytes, encoding: str | None = None) -> list[DocumentElement]:
+    text = parse_txt_text(data, encoding=encoding)
     return [
         DocumentElement(text=block, kind="paragraph", source_location=f"text block {index}")
         for index, block in enumerate(_text_blocks(text), start=1)
     ]
 
 
-def parse_txt_text(data: bytes) -> str:
+def parse_txt_text(data: bytes, encoding: str | None = None) -> str:
+    requested_encoding = (encoding or os.getenv("RAG_TEXT_ENCODING", "auto")).strip()
+    if requested_encoding.casefold() != "auto":
+        try:
+            return data.decode(requested_encoding)
+        except (LookupError, UnicodeDecodeError) as exc:
+            raise ValueError(f"Text could not be decoded with RAG_TEXT_ENCODING={requested_encoding}") from exc
     # Check UTF-32 before UTF-16 because their BOMs share a prefix.
     for encoding, markers in (
         ("utf-32", (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")),
@@ -228,8 +238,127 @@ def parse_txt_text(data: bytes) -> str:
                 except UnicodeDecodeError:
                     continue
             raise ValueError("Text document encoding could not be identified")
-        # Preserve support for common legacy single-byte text encodings.
-        return data.decode("latin1")
+        try:
+            from charset_normalizer import from_bytes
+        except ImportError as exc:
+            raise ValueError(
+                "Text encoding is ambiguous; install charset-normalizer or re-save the file as UTF-8"
+            ) from exc
+        match = from_bytes(data).best()
+        if match is None or match.chaos > 0.2 or (match.encoding == "ascii" and any(byte > 127 for byte in data)):
+            raise ValueError(
+                "Text encoding is uncertain; re-save the file as UTF-8 or configure its encoding"
+            )
+        return match.output().decode(match.encoding)
+
+
+@lru_cache(maxsize=8)
+def _docling_converter(
+    ocr_enabled: bool,
+    ocr_engine: str,
+    ocr_languages: tuple[str, ...],
+):
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    pipeline_options = PdfPipelineOptions(do_ocr=ocr_enabled, do_table_structure=True)
+    if ocr_enabled:
+        if ocr_engine == "rapidocr":
+            from docling.datamodel.pipeline_options import RapidOcrOptions
+
+            pipeline_options.ocr_options = RapidOcrOptions(lang=list(ocr_languages))
+        elif ocr_engine == "tesseract":
+            from docling.datamodel.pipeline_options import TesseractCliOcrOptions
+
+            pipeline_options.ocr_options = TesseractCliOcrOptions(lang=list(ocr_languages))
+        else:
+            raise ValueError("RAG_DOCUMENT_OCR_ENGINE must be rapidocr or tesseract")
+    return DocumentConverter(
+        allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+        },
+    )
+
+
+def _docling_available() -> bool:
+    try:
+        import docling  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _parse_with_docling(
+    data: bytes,
+    extension: str,
+    ocr_enabled: bool,
+    ocr_engine: str,
+    ocr_languages: tuple[str, ...],
+    max_pages: int,
+) -> list[DocumentElement]:
+    from docling.datamodel.base_models import DocumentStream
+
+    converter = _docling_converter(ocr_enabled, ocr_engine, ocr_languages)
+    source = DocumentStream(name=f"upload.{extension}", stream=io.BytesIO(data))
+    # Docling's converter and model pipelines keep mutable caches. Serializing
+    # conversion avoids races when multiple upload tasks share this process.
+    with _docling_conversion_lock:
+        result = converter.convert(
+            source,
+            max_num_pages=max_pages,
+            max_file_size=len(data),
+        )
+    document = getattr(result, "document", None)
+    if document is None:
+        raise ValueError("Document analysis did not produce readable content")
+
+    elements: list[DocumentElement] = []
+    table_number = 0
+    for item, _ in document.iterate_items(traverse_pictures=True):
+        label_value = getattr(getattr(item, "label", None), "value", "")
+        label = str(label_value or type(item).__name__).casefold()
+        page_numbers = {
+            int(provenance.page_no)
+            for provenance in getattr(item, "prov", [])
+            if getattr(provenance, "page_no", None) is not None
+        }
+        page_number = min(page_numbers) if page_numbers else None
+        if label == "table":
+            table_number += 1
+            text = item.export_to_markdown(doc=document)
+            kind = "table"
+            group_id = f"table-{table_number}"
+        elif label in {"picture", "chart"}:
+            caption = getattr(item, "caption_text", None)
+            text = caption(document) if callable(caption) else ""
+            kind = label
+            group_id = None
+        else:
+            text = str(getattr(item, "text", "") or "").strip()
+            kind = {
+                "title": "heading",
+                "section_header": "heading",
+                "list_item": "list_item",
+                "page_header": "header",
+                "page_footer": "footer",
+            }.get(label, label)
+            group_id = None
+        if not text:
+            continue
+        location = f"page {page_number}" if page_number else None
+        elements.append(
+            DocumentElement(
+                text=text,
+                kind=kind,
+                page_number=page_number,
+                heading_level=getattr(item, "level", None) if kind == "heading" else None,
+                source_location=location,
+                group_id=group_id,
+            )
+        )
+    return elements
 
 
 def _coerce_elements(items: Iterable[DocumentElement | tuple[int | None, str]]) -> list[DocumentElement]:
@@ -345,14 +474,41 @@ def extract_and_build_chunks(
     chunk_size: int,
     overlap: int,
     embed_many: Callable[[list[str]], list[list[float]]] | None = None,
+    parser_provider: str = "native",
+    ocr_enabled: bool = True,
+    ocr_engine: str = "rapidocr",
+    ocr_languages: tuple[str, ...] = ("iso:en",),
+    max_pages: int = 300,
+    text_encoding: str = "auto",
 ) -> list[ChunkData]:
     normalized_extension = extension.lower().lstrip(".")
-    if normalized_extension == "pdf":
+    provider = parser_provider.strip().lower()
+    if provider not in {"auto", "native", "docling"}:
+        raise ValueError("RAG_DOCUMENT_PARSER must be auto, native, or docling")
+    docling_format = normalized_extension in {"pdf", "docx"}
+    use_docling = docling_format and (provider == "docling" or (provider == "auto" and _docling_available()))
+    if use_docling:
+        try:
+            elements = _parse_with_docling(
+                payload,
+                normalized_extension,
+                ocr_enabled,
+                ocr_engine,
+                ocr_languages,
+                max_pages,
+            )
+        except ImportError as exc:
+            raise ValueError(
+                "Docling parser or its configured OCR engine is missing; install python-backend requirements"
+            ) from exc
+    elif provider == "docling" and docling_format:
+        raise ValueError("Docling parser is not installed; install python-backend requirements")
+    elif normalized_extension == "pdf":
         elements = parse_pdf_elements(payload)
     elif normalized_extension == "docx":
         elements = parse_docx_elements(payload)
     elif normalized_extension in {"txt", "text"}:
-        elements = parse_txt_elements(payload)
+        elements = parse_txt_elements(payload, encoding=text_encoding)
     else:
         raise ValueError(f"Unsupported document format: {extension}")
     chunks = build_chunks(elements, chunk_size, overlap, embed_many)
@@ -374,6 +530,12 @@ async def ingest_document(
     request_id: str,
     embed_many: Callable[[list[str]], list[list[float]]] | None = None,
     file_search: Any | None = None,
+    parser_provider: str = "native",
+    ocr_enabled: bool = True,
+    ocr_engine: str = "rapidocr",
+    ocr_languages: tuple[str, ...] = ("iso:en",),
+    max_pages: int = 300,
+    text_encoding: str = "auto",
 ) -> None:
     await asyncio.sleep(0)
     collection = collections.get(collection_id)
@@ -400,7 +562,18 @@ async def ingest_document(
             await store.record_audit(actor, "DOCUMENT_INGESTION_COMPLETED", "document", document_id, "READY", request_id)
             return
         chunks = await asyncio.to_thread(
-            extract_and_build_chunks, extension, payload, chunk_size, overlap, embed_many
+            extract_and_build_chunks,
+            extension,
+            payload,
+            chunk_size,
+            overlap,
+            embed_many,
+            parser_provider,
+            ocr_enabled,
+            ocr_engine,
+            ocr_languages,
+            max_pages,
+            text_encoding,
         )
         if not chunks:
             raise ValueError("No readable text was found in this document")
