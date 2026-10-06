@@ -369,6 +369,20 @@ def _parse_with_docling(
     return elements
 
 
+def _parse_with_native(
+    extension: str,
+    payload: bytes,
+    text_encoding: str,
+) -> list[DocumentElement]:
+    if extension == "pdf":
+        return parse_pdf_elements(payload)
+    if extension == "docx":
+        return parse_docx_elements(payload)
+    if extension in {"txt", "text"}:
+        return parse_txt_elements(payload, encoding=text_encoding)
+    raise ValueError(f"Unsupported document format: {extension}")
+
+
 def _coerce_elements(items: Iterable[DocumentElement | tuple[int | None, str]]) -> list[DocumentElement]:
     elements: list[DocumentElement] = []
     for item in items:
@@ -506,19 +520,32 @@ def extract_and_build_chunks(
                 max_pages,
             )
         except ImportError as exc:
-            raise ValueError(
-                "Docling parser or its configured OCR engine is missing; install python-backend requirements"
-            ) from exc
+            if provider != "auto":
+                raise ValueError(
+                    "Docling parser or its configured OCR engine is missing; install python-backend requirements"
+                ) from exc
+            log.warning(
+                "Docling dependencies are unavailable; using native extraction fallback for %s",
+                normalized_extension,
+                exc_info=True,
+            )
+            elements = _parse_with_native(normalized_extension, payload, text_encoding)
+        except Exception as exc:
+            if provider != "auto":
+                raise ValueError(
+                    "Docling could not process this document. Check model access or select RAG_DOCUMENT_PARSER=auto for native fallback."
+                ) from exc
+            log.warning(
+                "Docling could not process %s; using native extraction fallback: %s",
+                normalized_extension,
+                exc,
+                exc_info=True,
+            )
+            elements = _parse_with_native(normalized_extension, payload, text_encoding)
     elif provider == "docling" and docling_format:
         raise ValueError("Docling parser is not installed; install python-backend requirements")
-    elif normalized_extension == "pdf":
-        elements = parse_pdf_elements(payload)
-    elif normalized_extension == "docx":
-        elements = parse_docx_elements(payload)
-    elif normalized_extension in {"txt", "text"}:
-        elements = parse_txt_elements(payload, encoding=text_encoding)
     else:
-        raise ValueError(f"Unsupported document format: {extension}")
+        elements = _parse_with_native(normalized_extension, payload, text_encoding)
     chunks = build_chunks(elements, chunk_size, overlap, embed_many)
     if not chunks and normalized_extension == "pdf":
         raise ValueError("No extractable text was found in this PDF; scanned or image-only pages require OCR")
