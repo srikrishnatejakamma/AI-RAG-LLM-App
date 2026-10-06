@@ -10,6 +10,11 @@ class ChunkData:
     index: int
     page_number: int | None
     vector: list[float]
+    section_path: tuple[str, ...] = ()
+    element_types: tuple[str, ...] = ()
+    source_start: int | None = None
+    source_end: int | None = None
+    source_locations: tuple[str, ...] = ()
 
 
 @dataclass

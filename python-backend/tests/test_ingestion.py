@@ -8,7 +8,16 @@ from pypdf import PdfWriter
 
 from app.domain import CollectionData, DocumentData
 from app.domain import ChunkData
-from app.ingestion import build_chunks, ingest_document, parse_docx_text, parse_pdf_pages, parse_txt_text
+from app.ingestion import (
+    DocumentElement,
+    build_chunks,
+    extract_and_build_chunks,
+    ingest_document,
+    parse_docx_elements,
+    parse_docx_text,
+    parse_pdf_pages,
+    parse_txt_text,
+)
 from app.store import MemoryStore
 
 
@@ -40,6 +49,9 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_txt_text("hello".encode("utf-16")), "hello")
         self.assertEqual(parse_txt_text(b"caf\xe9"), "caf\u00e9")
 
+    def test_parse_txt_text_decodes_utf32_before_utf16(self):
+        self.assertEqual(parse_txt_text("hello".encode("utf-32")), "hello")
+
     def test_parse_docx_text_joins_paragraphs(self):
         document = DocxDocument()
         document.add_paragraph("First paragraph")
@@ -48,6 +60,36 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
         document.save(buffer)
 
         self.assertEqual(parse_docx_text(buffer.getvalue()), "First paragraph\nSecond paragraph")
+
+    def test_parse_docx_elements_preserves_heading_order_and_table_rows(self):
+        document = DocxDocument()
+        document.add_heading("Overview", level=1)
+        document.add_paragraph("General introduction")
+        table = document.add_table(rows=1, cols=2)
+        table.cell(0, 0).text = "Item"
+        table.cell(0, 1).text = "Description"
+        table.add_row().cells[0].text = "Example"
+        buffer = io.BytesIO()
+        document.save(buffer)
+
+        elements = parse_docx_elements(buffer.getvalue())
+        chunks = build_chunks(elements, chunk_size=200, overlap=20)
+
+        self.assertEqual([element.kind for element in elements[:3]], ["heading", "paragraph", "table_row"])
+        self.assertIn("Item | Description", [element.text for element in elements])
+        table_chunk = next(chunk for chunk in chunks if "Item | Description" in chunk.text)
+        self.assertEqual(table_chunk.section_path, ("Overview",))
+        self.assertIn("table_row", table_chunk.element_types)
+        self.assertIsNotNone(table_chunk.source_start)
+        self.assertTrue(any("table 1" in source for source in table_chunk.source_locations))
+
+    def test_parse_docx_list_paragraphs_keep_list_kind(self):
+        document = DocxDocument()
+        document.add_paragraph("First item", style="List Bullet")
+        buffer = io.BytesIO()
+        document.save(buffer)
+
+        self.assertEqual(parse_docx_elements(buffer.getvalue())[0].kind, "list_item")
 
     def test_parse_pdf_pages_preserves_one_based_page_numbers(self):
         writer = PdfWriter()
@@ -92,6 +134,30 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_build_chunks_returns_empty_when_every_page_is_blank(self):
         self.assertEqual(build_chunks([(1, "  "), (None, "")], chunk_size=200, overlap=20), [])
+
+    def test_build_chunks_retains_pdf_page_and_source_metadata(self):
+        chunks = build_chunks(
+            [DocumentElement("A paragraph", page_number=4, source_location="page 4, block 1")],
+            chunk_size=200,
+            overlap=20,
+        )
+
+        self.assertEqual(chunks[0].page_number, 4)
+        self.assertEqual(chunks[0].source_start, chunks[0].source_end)
+        self.assertEqual(chunks[0].element_types, ("paragraph",))
+
+    def test_image_only_pdf_returns_actionable_ocr_error(self):
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        buffer = io.BytesIO()
+        writer.write(buffer)
+
+        with self.assertRaisesRegex(ValueError, "require OCR"):
+            extract_and_build_chunks("pdf", buffer.getvalue(), chunk_size=200, overlap=20)
+
+    def test_extract_and_build_chunks_rejects_unknown_format(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported document format"):
+            extract_and_build_chunks("unknown", b"content", chunk_size=200, overlap=20)
 
     async def test_ingest_document_marks_document_ready_and_records_audit(self):
         store, collection, document = self.make_store_with_document()
