@@ -82,7 +82,7 @@ def main() -> int:
         for document in collection.documents.values()
         for chunk in document.chunks
     )
-    retriever = HybridRetriever()
+    retriever = HybridRetriever(dense_weight=0.35 if args.provider == "local" else 1.0)
     dense_rankings: list[list[str]] = []
     hybrid_rankings: list[list[str]] = []
     answer_phrase_passes: list[bool] = []
@@ -111,7 +111,10 @@ def main() -> int:
         answer = extractive_answer(case["question"], [
             f"[{document.name}] {chunk.text}" for document, chunk, _ in hybrid
         ])
-        answer_pass = all(phrase.casefold() in answer.casefold() for phrase in case.get("answer_phrases", []))
+        answer_pass = (
+            all(phrase.casefold() in answer.casefold() for phrase in case.get("answer_phrases", []))
+            and all(phrase.casefold() not in answer.casefold() for phrase in case.get("answer_must_not_contain", []))
+        )
         dense_rankings.append(dense_ids)
         hybrid_rankings.append(hybrid_ids)
         answer_phrase_passes.append(answer_pass)
@@ -119,6 +122,7 @@ def main() -> int:
             "question": case["question"],
             "expectedSources": sorted(expected),
             "expectedAnswerPhrases": case.get("answer_phrases", []),
+            "forbiddenAnswerPhrases": case.get("answer_must_not_contain", []),
             "denseTopK": dense_ids,
             "hybridTopK": hybrid_ids,
             "extractiveAnswer": answer,

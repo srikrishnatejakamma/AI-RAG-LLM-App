@@ -5,17 +5,20 @@ import logging
 import re
 import threading
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, Callable
 
 import httpx
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
-from stop_words import get_stop_words
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from .config import Settings
 from .models import FindSourcesToolArgs, ReadSourceToolArgs
-from .text_pipeline import TOKEN_RE, embed_local, normalize_text
+from .text_pipeline import (
+    embed_local,
+    normalize_text,
+)
 
 
 log = logging.getLogger("python-rag-backend")
@@ -31,11 +34,6 @@ def create_openai_client(settings: Settings) -> OpenAI | None:
         base_url=settings.openai_base_url.rstrip("/"),
         http_client=httpx.Client(),
     )
-
-
-@lru_cache(maxsize=1)
-def load_stop_words() -> set[str]:
-    return {token.lower() for token in get_stop_words("en")}
 
 
 class EmbeddingService:
@@ -123,66 +121,56 @@ class EmbeddingService:
         return self.embed_many([text])[0]
 
 
-def extractive_answer(question: str, passages: list[str]) -> str:
-    stop_words = load_stop_words()
-    policy_list_intent = bool(re.search(
-        r"\b(?:main|full|key|major|primary|all|list)\b.{0,32}\bpolic(?:y|ies)\b|"
-        r"\bpolic(?:y|ies)\b.{0,32}\b(?:main|full|key|major|primary|all|list)\b",
-        question, re.IGNORECASE,
+def extractive_answer(
+    question: str,
+    passages: list[str],
+) -> str:
+    summary_intent = bool(re.search(
+        r"\b(?:summari[sz]e|key\s+points?|highlights?|overview|main\s+points?|list\s+the)\b",
+        question,
+        re.IGNORECASE,
     ))
-    summary_intent = policy_list_intent or bool(re.search(r"\b(?:summari[sz]e|key\s+points?|highlights?|overview|main\s+points?)\b", question, re.IGNORECASE))
-
-    def canonical_terms(text: str) -> set[str]:
-        result = set()
-        for term in TOKEN_RE.findall(text.lower()):
-            if term in stop_words:
-                continue
-            if len(term) > 5 and term.endswith("ies"):
-                term = term[:-3] + "y"
-            elif len(term) > 4 and term.endswith("s") and not term.endswith("ss"):
-                term = term[:-1]
-            result.add(term)
-        return result
-
-    question_terms = canonical_terms(question)
-    policy_topics = {
-        "workplace", "compensation", "benefit", "pay", "hour", "leave", "timeoff", "attendance",
-        "conduct", "safety", "harassment", "privacy", "remote", "referral", "expense", "travel",
-        "discipline", "employment", "dress", "performance", "holiday", "absence", "overtime",
-    }
-    ranked: list[tuple[int, str]] = []
+    candidates: list[str] = []
     for passage in passages:
         content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
         for sentence in re.split(r"(?<=[.!?])\s+|\n+", content):
             cleaned = normalize_text(sentence)
             if len(cleaned) < 24:
                 continue
-            sentence_terms = canonical_terms(cleaned)
-            overlap = len(question_terms & sentence_terms)
-            topic_hits = len(policy_topics & sentence_terms) if policy_list_intent else 0
-            if policy_list_intent and re.search(r"\b(?:this section describes|these policies help|please sign to acknowledge|employee acknowledgement)\b", cleaned, re.IGNORECASE):
+            # Ignore source templates whose fill-in field has not been completed.
+            if re.search(r"\[[^\]]*(?:/|insert|your\s+company|enter\s+)", cleaned, re.IGNORECASE):
                 continue
-            if question_terms and not summary_intent and overlap == 0:
-                continue
-            ranked.append((overlap * 3 + topic_hits * 2 + (1 if policy_list_intent else 0), cleaned))
-    ranked.sort(key=lambda row: row[0], reverse=True)
+            candidates.append(cleaned)
+    if not candidates:
+        return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
+
+    query_and_sentences = [question, *candidates]
+    word_vectorizer = TfidfVectorizer(lowercase=True, strip_accents="unicode", ngram_range=(1, 2), sublinear_tf=True)
+    char_vectorizer = TfidfVectorizer(analyzer="char_wb", lowercase=True, strip_accents="unicode", ngram_range=(3, 5), sublinear_tf=True)
+    word_matrix = word_vectorizer.fit_transform(query_and_sentences)
+    char_matrix = char_vectorizer.fit_transform(query_and_sentences)
+    word_scores = cosine_similarity(word_matrix[1:], word_matrix[0]).ravel()
+    char_scores = cosine_similarity(char_matrix[1:], char_matrix[0]).ravel()
+    ranked: list[tuple[float, int, str]] = []
+    for idx, sentence in enumerate(candidates):
+        lexical = 0.65 * float(word_scores[idx]) + 0.35 * float(char_scores[idx])
+        if lexical > 0.015:
+            ranked.append((lexical, idx, sentence))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+
     selected: list[str] = []
-    excerpt_limit = 10 if policy_list_intent else 6 if summary_intent else 3
-    for score, sentence in ranked:
-        if not summary_intent and score <= 0:
+    selected_indexes: list[int] = []
+    excerpt_limit = 6 if summary_intent else 3
+    for _, idx, sentence in ranked:
+        if any(float(cosine_similarity(char_matrix[idx + 1], char_matrix[prior + 1])[0, 0]) >= 0.86 for prior in selected_indexes):
             continue
-        sentence_terms = canonical_terms(sentence)
-        if any(
-            len(sentence_terms & canonical_terms(prior)) / max(1, min(len(sentence_terms), len(canonical_terms(prior)))) >= 0.82
-            for prior in selected
-        ):
-            continue
-        selected.append(sentence if len(sentence) <= 320 else sentence[:317] + "…")
+        selected.append(sentence if len(sentence) <= 320 else sentence[:317] + "\u2026")
+        selected_indexes.append(idx)
         if len(selected) == excerpt_limit:
             break
     if not selected:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
-    return "Based on the document:\n\n• " + "\n\n• ".join(selected)
+    return "Based on the document:\n\n\u2022 " + "\n\n\u2022 ".join(selected)
 
 
 class OpenAIAgentOrchestrator:

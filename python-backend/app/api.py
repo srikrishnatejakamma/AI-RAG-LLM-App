@@ -44,7 +44,7 @@ class AppContext:
         self.store = MemoryStore()
         self.sessions: dict[str, SessionData] = {}
         self.embedding_service = EmbeddingService(self.settings)
-        self.retriever = HybridRetriever()
+        self.retriever = HybridRetriever(dense_weight=0.35 if self.settings.embedding_provider == "local" else 1.0)
         self.agent = OpenAIAgentOrchestrator(self.settings)
         self.file_search = OpenAIFileSearch(self.settings)
         self.ingestion_slots = asyncio.BoundedSemaphore(6)

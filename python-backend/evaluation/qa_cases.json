@@ -47,6 +47,14 @@
     {
       "id": "data_access",
       "text": "Access to confidential files must be limited to employees whose current job duties require it. Managers must review team access permissions every quarter."
+    },
+    {
+      "id": "health_benefits",
+      "text": "Benefits and perks in this section describe what we offer employees. We provide information on health insurance plans and benefits such as work from home options and company-issued equipment. According to COBRA, eligible employees may continue group health benefits for a limited period after leaving the company."
+    },
+    {
+      "id": "performance_template",
+      "text": "This way, you can receive feedback in a timely manner and avoid surprises during your [annual/ bi-annual/ quarterly] performance review. To meet these objectives, we have established [annual/ bi-annual/ quarterly] performance reviews. Revisit those goals during [annual/ bi-annual/ quarterly] performance reviews."
     }
   ],
   "questions": [
@@ -54,6 +62,34 @@
       "question": "How early should someone ask for vacation?",
       "relevant_sources": ["leave_request"],
       "answer_phrases": ["10 calendar days"]
+    },
+    {
+      "question": "wat are the anual leavs?",
+      "relevant_sources": ["leave_request"],
+      "answer_phrases": ["10 calendar days"]
+    },
+    {
+      "question": "Annual Leaves",
+      "relevant_sources": ["leave_request"],
+      "answer_phrases": ["10 calendar days"],
+      "answer_must_not_contain": ["performance review", "[annual/"]
+    },
+    {
+      "question": "health",
+      "relevant_sources": ["health_benefits"],
+      "answer_phrases": ["health insurance"]
+    },
+    {
+      "question": "benefits",
+      "relevant_sources": ["health_benefits"],
+      "answer_phrases": ["health insurance", "COBRA"],
+      "answer_must_not_contain": ["in this section describe"]
+    },
+    {
+      "question": "exact benefits",
+      "relevant_sources": ["health_benefits"],
+      "answer_phrases": ["health insurance", "COBRA"],
+      "answer_must_not_contain": ["performance review"]
     },
     {
       "question": "How long do we keep a former customer's closed account file?",
