@@ -131,7 +131,10 @@ class Settings:
                     "documentParserStatus": "degraded",
                     "documentParserMessage": "RAG_DOCUMENT_OCR_ENGINE must be rapidocr or tesseract.",
                 }
-            if self.document_ocr_engine == "rapidocr" and importlib.util.find_spec("rapidocr_onnxruntime") is None:
+            if self.document_ocr_engine == "rapidocr" and (
+                importlib.util.find_spec("rapidocr") is None
+                or importlib.util.find_spec("onnxruntime") is None
+            ):
                 return {
                     "documentParser": provider,
                     "documentParserStatus": "degraded",
