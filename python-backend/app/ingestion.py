@@ -22,7 +22,7 @@ def parse_pdf_pages(data: bytes) -> list[tuple[int, str]]:
     for idx, page in enumerate(reader.pages, start=1):
         try:
             text = page.extract_text(extraction_mode="layout") or ""
-        except TypeError:
+        except (KeyError, TypeError):
             text = page.extract_text() or ""
         pages.append((idx, text))
     return pages

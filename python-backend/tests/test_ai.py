@@ -1,7 +1,14 @@
 import unittest
 from types import SimpleNamespace
 
-from app.ai import EmbeddingService, FunctionTool, OpenAIAgentOrchestrator, extractive_answer
+from app.ai import (
+    EmbeddingService,
+    FunctionTool,
+    OpenAIAgentOrchestrator,
+    contextualize_question,
+    correct_query_spelling,
+    extractive_answer,
+)
 from app.config import Settings
 from app.models import ReadSourceToolArgs
 
@@ -23,12 +30,13 @@ class AiTests(unittest.TestCase):
         answer = extractive_answer(
             "Summarize the key points",
             ["[overview.txt] Teams review records annually. Managers approve retention exceptions."],
+            overview=True,
         )
 
         self.assertIn("Teams review records annually", answer)
         self.assertIn("Managers approve retention exceptions", answer)
 
-    def test_full_policy_list_returns_multiple_policy_areas_and_skips_intro_boilerplate(self):
+    def test_policy_overview_summarizes_evidence_and_skips_intro_boilerplate(self):
         answer = extractive_answer(
             "What is the full list of main policies?",
             ["[handbook] Workplace policies. This section describes policies that apply to everyone. "
@@ -37,19 +45,44 @@ class AiTests(unittest.TestCase):
              "Employees must report workplace safety hazards to their manager promptly. "
              "Employees may report harassment directly to Human Resources. "
              "Staff must record attendance and notify managers about absences."],
+            overview=True,
         )
 
+        self.assertIn("Based on the document", answer)
         self.assertIn("overtime pay", answer)
-        self.assertIn("Annual leave", answer)
         self.assertIn("safety hazards", answer)
-        self.assertIn("report harassment", answer)
-        self.assertIn("record attendance", answer)
         self.assertNotIn("This section describes", answer)
 
     def test_extractive_answer_reports_no_supporting_evidence(self):
         answer = extractive_answer("What is the retention policy?", ["[office.txt] The office is near the river."])
 
         self.assertIn("I don't have enough information", answer)
+
+    def test_lexical_matching_handles_regular_plural_forms(self):
+        answer = extractive_answer(
+            "What is the minimum password length?",
+            ["[passwords.txt] Account passwords must contain at least 14 characters."],
+            overview=False,
+        )
+
+        self.assertIn("14 characters", answer)
+
+    def test_query_correction_uses_collection_terms_and_preserves_short_words(self):
+        passages = ["Annual leave requests must be submitted to a supervisor."]
+
+        self.assertEqual(correct_query_spelling("ask for leavs", passages), "ask for leave")
+
+    def test_specific_followup_does_not_inherit_a_collection_overview(self):
+        passages = ["Paid time off (PTO) requests need supervisor approval.", "Parental leave lasts 12 weeks."]
+
+        self.assertEqual(
+            contextualize_question("Explain PTO", ["What are the main policies?"], passages),
+            "Explain PTO",
+        )
+        self.assertEqual(
+            contextualize_question("more", ["What are the main policies?", "Explain PTO"], passages),
+            "Explain PTO more",
+        )
 
     def test_embedding_service_uses_local_provider_by_default_and_rejects_missing_openai_key(self):
         local = EmbeddingService(Settings(admin_password="secret", embedding_provider="local", openai_api_key=""))

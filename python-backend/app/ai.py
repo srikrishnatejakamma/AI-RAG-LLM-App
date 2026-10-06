@@ -20,11 +20,22 @@ from .models import FindSourcesToolArgs, ReadSourceToolArgs
 from .text_pipeline import (
     TOKEN_RE,
     embed_local,
+    lexical_tokens,
     normalize_text,
 )
 
 
 log = logging.getLogger("python-rag-backend")
+
+
+def _word_vectorizer(**kwargs: Any) -> TfidfVectorizer:
+    return TfidfVectorizer(
+        tokenizer=lexical_tokens,
+        token_pattern=None,
+        lowercase=False,
+        stop_words=None,
+        **kwargs,
+    )
 
 
 def create_openai_client(settings: Settings) -> OpenAI | None:
@@ -129,18 +140,12 @@ def extractive_answer(
     passages: list[str],
     previous_answer: str | None = None,
     overview: bool | None = None,
+    section_context: list[str] | None = None,
 ) -> str:
+    # Callers with the full collection should pass an explicit scope decision;
+    # the default keeps the helper useful for standalone document summaries.
     overview = is_collection_overview(question, passages) if overview is None else overview
-    sections = _extract_document_sections(passages)
-    if overview and sections:
-        previous = (previous_answer or "").casefold()
-        selected = [section for section in sections if section[0].casefold() not in previous]
-        if not selected:
-            return "I’ve covered the top-level sections identified in the document. Ask about one of them for its policy details."
-        return "Main document sections:\n\n" + "\n".join(
-            f"- {title} (page {page})" if page else f"- {title}"
-            for title, page in selected
-        )
+    question = correct_query_spelling(question, passages)
     candidates: list[str] = []
     for passage in passages:
         content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
@@ -152,24 +157,56 @@ def extractive_answer(
             if re.search(r"\[[^\]]+\]", cleaned):
                 continue
             candidates.append(cleaned)
+    section_rows = _extract_document_sections(section_context or passages)
+    section_titles = [title.casefold() for title, _, _ in section_rows]
+    if section_titles:
+        candidates = [
+            sentence for sentence in candidates
+            if not any(
+                sentence.casefold().startswith(title)
+                and (len(sentence) == len(title) or sentence[len(title) : len(title) + 1] in {" ", ".", ":", "-"})
+                for title in section_titles
+            )
+        ]
     if not candidates:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
 
-    word_vectorizer = TfidfVectorizer(lowercase=True, strip_accents="unicode", ngram_range=(1, 2), sublinear_tf=True)
+    collection_text = [
+        re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
+        for passage in (section_context or passages)
+        if passage.strip()
+    ]
+    collection_vectorizer = _word_vectorizer(strip_accents="unicode", ngram_range=(1, 1))
+    try:
+        collection_vectorizer.fit(collection_text)
+    except ValueError:
+        collection_vectorizer = None
+
+    word_vectorizer = _word_vectorizer(
+        strip_accents="unicode",
+        ngram_range=(1, 2),
+        sublinear_tf=True,
+    )
     char_vectorizer = TfidfVectorizer(analyzer="char_wb", lowercase=True, strip_accents="unicode", ngram_range=(3, 5), sublinear_tf=True)
     word_matrix = word_vectorizer.fit_transform(candidates)
     char_matrix = char_vectorizer.fit_transform([question, *candidates])
+    query_tokens = set(lexical_tokens(question))
+    candidate_tokens = [set(lexical_tokens(candidate)) for candidate in candidates]
     selected: list[str] = []
     selected_indexes: list[int] = []
     if overview:
         similarities = cosine_similarity(word_matrix)
         centrality = similarities.sum(axis=1) / max(1, len(candidates) - 1)
+        sentence_information = np.asarray(word_matrix.multiply(word_vectorizer.idf_).sum(axis=1)).ravel()
+        centrality = centrality * (1.0 + sentence_information / max(1, word_matrix.shape[1]))
         prior_lines = {
             normalize_text(re.sub(r"^[\s\u2022*-]+", "", line)).casefold()
             for line in (previous_answer or "").splitlines()
             if len(line.strip()) > 24
         }
-        excerpt_limit = max(1, int(len(candidates) ** 0.5))
+        primary_sections = sum(1 for _, _, depth in section_rows if depth == 0)
+        summary_size = primary_sections if primary_sections else len(candidates)
+        excerpt_limit = max(1, int(np.ceil(np.log2(summary_size + 1))))
         remaining = [idx for idx, sentence in enumerate(candidates) if not any(
             sentence.casefold() in prior or prior in sentence.casefold() for prior in prior_lines
         )]
@@ -186,13 +223,49 @@ def extractive_answer(
     else:
         char_scores = cosine_similarity(char_matrix[1:], char_matrix[0]).ravel()
         word_scores = cosine_similarity(word_matrix, word_vectorizer.transform([question])).ravel()
+        fuzzy_scores: list[float] = []
+        evidence_strength: list[float] = []
+        collection_median_idf = (
+            float(np.median(collection_vectorizer.idf_))
+            if collection_vectorizer is not None
+            else 0.0
+        )
+        for tokens in candidate_tokens:
+            matched = 0.0
+            information = 0.0
+            for query_token in query_tokens:
+                closest = max(
+                    (
+                        (SequenceMatcher(None, query_token, candidate_token).ratio(), candidate_token)
+                        for candidate_token in tokens
+                    ),
+                    default=(0.0, ""),
+                )
+                similarity, candidate_token = closest
+                if similarity >= 0.84:
+                    matched += similarity
+                    if collection_vectorizer is not None:
+                        feature_index = collection_vectorizer.vocabulary_.get(candidate_token)
+                        if feature_index is not None:
+                            information += float(collection_vectorizer.idf_[feature_index]) * similarity
+            fuzzy_scores.append(matched / max(1, len(query_tokens)))
+            evidence_strength.append(information)
         ranked = sorted(
-            ((0.65 * float(word_scores[idx]) + 0.35 * float(char_scores[idx]), idx) for idx in range(len(candidates))),
+            (
+                (
+                    max(float(word_scores[idx]), fuzzy_scores[idx]) + 0.1 * float(char_scores[idx]),
+                    idx,
+                )
+                for idx in range(len(candidates))
+                if (word_scores[idx] > 0 or fuzzy_scores[idx] > 0)
+                and (
+                    len(query_tokens) <= 1
+                    or evidence_strength[idx] >= collection_median_idf
+                )
+            ),
             key=lambda item: (-item[0], item[1]),
         )
         for score, idx in ranked:
-            if score <= 0.015:
-                break
             if any(float(cosine_similarity(char_matrix[idx + 1], char_matrix[prior + 1])[0, 0]) >= 0.86 for prior in selected_indexes):
                 continue
             sentence = candidates[idx]
@@ -209,7 +282,7 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     texts = [re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage) for passage in passages if passage.strip()]
     if not texts:
         return False
-    vectorizer = TfidfVectorizer(stop_words="english", strip_accents="unicode", ngram_range=(1, 1))
+    vectorizer = _word_vectorizer(strip_accents="unicode", ngram_range=(1, 1))
     try:
         vectorizer.fit_transform(texts)
     except ValueError:
@@ -218,6 +291,22 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     terms = set(vectorizer.build_analyzer()(question))
     if not terms:
         return False
+    section_rows = _extract_document_sections(passages)
+    if section_rows:
+        section_vectorizer = _word_vectorizer(strip_accents="unicode", ngram_range=(1, 1))
+        try:
+            section_vectorizer.fit([title for title, _, _ in section_rows])
+            query_terms = set(section_vectorizer.build_analyzer()(question))
+            title_matches = [
+                (title, depth, set(section_vectorizer.build_analyzer()(title)) & query_terms)
+                for title, _, depth in section_rows
+            ]
+            if any(depth > 0 and matched for _, depth, matched in title_matches):
+                return False
+            if any(matched and len(matched) / max(1, len(query_terms)) >= 0.75 for _, _, matched in title_matches):
+                return False
+        except ValueError:
+            pass
     coverage = query.nnz / len(terms)
     if query.nnz == 0:
         return False
@@ -233,38 +322,37 @@ def contextualize_question(question: str, previous_questions: list[str], passage
     texts = [re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage) for passage in passages if passage.strip()]
     if not texts:
         return question
-    vectorizer = TfidfVectorizer(stop_words="english", strip_accents="unicode", ngram_range=(1, 1))
+    vectorizer = _word_vectorizer(strip_accents="unicode", ngram_range=(1, 1))
     try:
         vectorizer.fit(texts)
     except ValueError:
         return question
     query = vectorizer.transform([question])
-    terms = set(vectorizer.build_analyzer()(question))
-    query_idf = vectorizer.idf_[query.indices] if query.nnz else []
-    corpus_median_idf = float(np.median(vectorizer.idf_))
-    if query.nnz and len(terms) > 1 and float(query_idf.mean()) >= corpus_median_idf:
-        return question
-    if query.nnz and len(terms) == 1 and float(query_idf.mean()) > corpus_median_idf:
-        return question
-
-    # Pick the most informative earlier user turn from collection-derived TF-IDF
-    # features, rather than concatenating every previous turn (which adds noise).
     candidates = [text for text in previous_questions if text.strip()]
     if not candidates:
         return question
     previous_vectors = vectorizer.transform(candidates)
-    ranked = sorted(
-        range(len(candidates)),
-        key=lambda idx: (
-            -float(previous_vectors[idx].multiply(vectorizer.idf_).sum()),
-            -previous_vectors[idx].nnz,
-            -idx,
-        ),
-    )
-    best_previous = candidates[ranked[0]]
-    if previous_vectors[ranked[0]].nnz == 0:
-        return question
-    return f"{best_previous} {question}"
+
+    # A new query with its own collection evidence stays standalone unless it
+    # shares collection terms with a prior user query and those terms carry less
+    # information than the collection's typical feature. This prevents a broad
+    # first question from contaminating a later, specific topic question.
+    if query.nnz:
+        similarities = cosine_similarity(query, previous_vectors).ravel()
+        best_index = int(np.argmax(similarities)) if similarities.size else -1
+        if best_index < 0 or similarities[best_index] <= 0:
+            return question
+        query_idf = vectorizer.idf_[query.indices]
+        if float(query_idf.mean()) >= float(np.median(vectorizer.idf_)):
+            return question
+        return f"{candidates[best_index]} {question}"
+
+    # Queries with no collection vocabulary are usually referential follow-ups.
+    # Attach them to the most recent earlier turn that has collection evidence.
+    for index in range(len(candidates) - 1, -1, -1):
+        if previous_vectors[index].nnz:
+            return f"{candidates[index]} {question}"
+    return question
 
 
 def correct_query_spelling(question: str, passages: list[str]) -> str:
@@ -276,16 +364,19 @@ def correct_query_spelling(question: str, passages: list[str]) -> str:
         if word in vocabulary or len(word) < 5:
             corrected.append(word)
             continue
-        choices = (candidate for candidate in vocabulary if candidate[0] == word[0] and abs(len(candidate) - len(word)) <= 2)
+        choices = (
+            candidate
+            for candidate in vocabulary
+            if candidate[0] == word[0] and abs(len(candidate) - len(word)) <= max(1, round(len(word) * 0.2))
+        )
         best = max(choices, key=lambda candidate: SequenceMatcher(None, word, candidate).ratio(), default=word)
         corrected.append(best if SequenceMatcher(None, word, best).ratio() >= 0.78 else word)
     return " ".join(corrected)
 
 
-def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
-    # A page's TOC-like rows are identified from its own layout evidence. Keep
-    # only rows at the shallowest indentation level in the detected TOC pages;
-    # if extraction provides no hierarchy, let the answerer summarize content.
+def _extract_document_sections(passages: list[str]) -> list[tuple[str, str, int]]:
+    # Recover section depth from document layout; section names and hierarchy
+    # come from the uploaded content rather than an application vocabulary.
     candidates: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
     for passage in passages:
         source = re.match(r"^\[([^,\]]+).*?page\s+(\d+)\]\s*", passage, re.IGNORECASE)
@@ -308,7 +399,7 @@ def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
     by_document: dict[str, list[tuple[str, list[tuple[str, str, int]]]]] = {}
     for (document, source_page), rows in candidates.items():
         by_document.setdefault(document, []).append((source_page, rows))
-    sections: list[tuple[str, str]] = []
+    sections: list[tuple[str, str, int]] = []
     seen_titles: set[str] = set()
     for pages in by_document.values():
         counts = [len(rows) for _, rows in pages]
@@ -320,14 +411,13 @@ def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
         minimum_density = max(3, int(peak * 0.35))
         all_rows = [row for _, rows in pages if len(rows) >= minimum_density for row in rows]
         indentation_levels = sorted({indentation for _, _, indentation in all_rows})
-        if len(indentation_levels) < 2:
-            continue
-        shallowest = indentation_levels[0]
+        shallowest = indentation_levels[0] if indentation_levels else 0
         for title, page, indentation in all_rows:
             key = title.casefold()
-            if indentation != shallowest or key in seen_titles:
+            if key in seen_titles:
                 continue
-            sections.append((title, page))
+            depth = indentation - shallowest if len(indentation_levels) > 1 else 0
+            sections.append((title, page, depth))
             seen_titles.add(key)
     return sections
 

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("RAG_ADMIN_PASSWORD", "evaluation-only")
 
-from app.ai import EmbeddingService, extractive_answer  # noqa: E402
+from app.ai import EmbeddingService, correct_query_spelling, extractive_answer  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.domain import ChunkData, CollectionData, DocumentData  # noqa: E402
 from app.retrieval import HybridRetriever  # noqa: E402
@@ -87,9 +87,11 @@ def main() -> int:
     hybrid_rankings: list[list[str]] = []
     answer_phrase_passes: list[bool] = []
     details: list[dict[str, Any]] = []
+    vocabulary = [item["text"] for item in corpus]
 
     for case in dataset["questions"]:
-        question_vector = embedding_service.embed(case["question"])
+        question = correct_query_spelling(case["question"], vocabulary)
+        question_vector = embedding_service.embed(question)
         dense = []
         for document, chunk in entries:
             score = cosine(question_vector, chunk.vector)
@@ -101,16 +103,16 @@ def main() -> int:
             collection.id,
             entries,
             question_vector,
-            case["question"],
+            question,
             args.top_k,
             settings.minimum_score,
         )
         dense_ids = [source_id for source_id, _ in dense]
         hybrid_ids = [document.id for document, _, _ in hybrid]
         expected = set(case["relevant_sources"])
-        answer = extractive_answer(case["question"], [
+        answer = extractive_answer(question, [
             f"[{document.name}] {chunk.text}" for document, chunk, _ in hybrid
-        ])
+        ], overview=False, section_context=vocabulary)
         answer_pass = (
             all(phrase.casefold() in answer.casefold() for phrase in case.get("answer_phrases", []))
             and all(phrase.casefold() not in answer.casefold() for phrase in case.get("answer_must_not_contain", []))
@@ -120,6 +122,7 @@ def main() -> int:
         answer_phrase_passes.append(answer_pass)
         details.append({
             "question": case["question"],
+            "normalizedQuestion": question,
             "expectedSources": sorted(expected),
             "expectedAnswerPhrases": case.get("answer_phrases", []),
             "forbiddenAnswerPhrases": case.get("answer_must_not_contain", []),

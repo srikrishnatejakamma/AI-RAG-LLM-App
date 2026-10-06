@@ -3,13 +3,14 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .domain import ChunkData, DocumentData
-from .text_pipeline import cosine
+from .text_pipeline import TOKEN_RE, cosine, lexical_tokens
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,19 @@ class HybridRetriever:
                     fused[idx] = fused.get(idx, 0.0) + 1.0 / (self.rrf_constant + rank)
 
         if index.char_vectorizer is not None and index.char_matrix is not None:
-            query = index.char_vectorizer.transform([question])
+            vocabulary = set(index.vectorizer.vocabulary_) if index.vectorizer is not None else set()
+            vocabulary = {term for term in vocabulary if " " not in term}
+            near_miss_terms = []
+            for term in TOKEN_RE.findall(question.lower()):
+                if term in vocabulary:
+                    continue
+                closest = max(
+                    (SequenceMatcher(None, term, candidate).ratio() for candidate in vocabulary),
+                    default=0.0,
+                )
+                if closest >= 0.84:
+                    near_miss_terms.append(term)
+            query = index.char_vectorizer.transform([" ".join(near_miss_terms)])
             if query.nnz:
                 char_scores = cosine_similarity(index.char_matrix, query).ravel()
                 char_order = sorted(
@@ -90,7 +103,9 @@ class HybridRetriever:
                 return cached
 
             vectorizer = TfidfVectorizer(
-                lowercase=True,
+                tokenizer=lexical_tokens,
+                token_pattern=None,
+                lowercase=False,
                 strip_accents="unicode",
                 ngram_range=(1, 2),
                 sublinear_tf=True,

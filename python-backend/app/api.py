@@ -473,11 +473,15 @@ async def chat(
         for chunk in document.chunks
     )
     collection_text = [chunk.text for _, chunk in ready_chunks]
+    collection_context = [
+        f"[{document.name}, chunk {chunk.index}, page {chunk.page_number}]\n{chunk.text}"
+        for document, chunk in ready_chunks
+    ]
     standalone_question = correct_query_spelling(question, collection_text)
     contextual_question = contextualize_question(standalone_question, prior_user_messages, collection_text)
     continuation = contextual_question != standalone_question
     contextual_question = correct_query_spelling(contextual_question, collection_text)
-    broad_summary = is_collection_overview(contextual_question, collection_text)
+    broad_summary = is_collection_overview(contextual_question, collection_context)
     if ctx.settings.retrieval_provider == "openai-file-search":
         if not ctx.file_search.available:
             raise HTTPException(status_code=503, detail={"error": "Hosted File Search is not configured"})
@@ -514,8 +518,6 @@ async def chat(
         ctx.settings.minimum_score,
     )
 
-    if not matches and broad_summary and ready_chunks:
-        matches = [(document, chunk, 0.0) for document, chunk in ready_chunks[: ctx.settings.retrieval_top_k]]
     if not matches:
         processing = any(doc.status == "PROCESSING" for doc in collection.documents.values())
         message = "Documents are still being processed. Try again in a moment." if processing else "I couldn't find enough information in this collection to answer that."
@@ -529,13 +531,7 @@ async def chat(
 
     fallback_context = context
     if broad_summary:
-        fallback_context = []
-        for document in collection.documents.values():
-            if document.status != "READY":
-                continue
-            for chunk in document.chunks:
-                page_info = f", page {chunk.page_number}" if chunk.page_number is not None else ""
-                fallback_context.append(f"[{document.name}, chunk {chunk.index}{page_info}]\n{chunk.text}")
+        fallback_context = collection_context
 
     answer = ""
     if ctx.agent.available():
@@ -548,6 +544,7 @@ async def chat(
                 fallback_context,
                 previous_answer if continuation else None,
                 overview=broad_summary,
+                section_context=collection_context,
             )
     else:
         answer = extractive_answer(
@@ -555,6 +552,7 @@ async def chat(
             fallback_context,
             previous_answer if continuation else None,
             overview=broad_summary,
+            section_context=collection_context,
         )
 
     citations = [build_citation(m) for m in matches]

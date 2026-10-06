@@ -4,12 +4,29 @@ import hashlib
 import math
 import re
 
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
 
 TOKEN_RE = re.compile(r"[\w\d]{2,}", re.UNICODE)
 
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def lexical_tokens(text: str) -> list[str]:
+    """Normalize regular English plurals so singular and plural queries align."""
+    tokens = [token.casefold() for token in TOKEN_RE.findall(text)]
+    normalized: list[str] = []
+    for token in tokens:
+        if token in ENGLISH_STOP_WORDS:
+            continue
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 4 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+            token = token[:-1]
+        normalized.append(token)
+    return normalized
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -21,7 +38,7 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
         content = re.sub(r"[ \t\f\v]+", " ", line[len(indentation) :].rstrip())
         lines.append(indentation + content)
     normalized = "\n".join(lines).strip("\n")
-    if not normalized:
+    if not normalized.strip():
         return []
     if chunk_size < 1:
         raise ValueError("Chunk size must be positive")
