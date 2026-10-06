@@ -82,7 +82,7 @@ def main() -> int:
         for document in collection.documents.values()
         for chunk in document.chunks
     )
-    retriever = HybridRetriever(dense_weight=0.35 if args.provider == "local" else 1.0)
+    retriever = HybridRetriever(dense_weight=0.0 if args.provider == "local" else 1.0)
     dense_rankings: list[list[str]] = []
     hybrid_rankings: list[list[str]] = []
     answer_phrase_passes: list[bool] = []

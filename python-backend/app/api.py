@@ -51,7 +51,10 @@ class AppContext:
         self.store = MemoryStore()
         self.sessions: dict[str, SessionData] = {}
         self.embedding_service = EmbeddingService(self.settings)
-        self.retriever = HybridRetriever(dense_weight=0.35 if self.settings.embedding_provider == "local" else 1.0)
+        # The built-in hashing vector is useful as a deterministic feature
+        # vector but is not a semantic embedding. Do not use it to claim
+        # semantic relevance; local mode ranks lexical evidence only.
+        self.retriever = HybridRetriever(dense_weight=0.0 if self.settings.embedding_provider == "local" else 1.0)
         self.agent = OpenAIAgentOrchestrator(self.settings)
         self.file_search = OpenAIFileSearch(self.settings)
         self.ingestion_slots = asyncio.BoundedSemaphore(6)
@@ -492,6 +495,11 @@ async def chat(
         f"[{document.name}, chunk {chunk.index}, page {chunk.page_number}]\n{chunk.text}"
         for document, chunk in ready_chunks
     ]
+    section_outline = list(dict.fromkeys(
+        (chunk.section_path, chunk.page_number)
+        for _, chunk in ready_chunks
+        if chunk.section_path
+    ))
     standalone_question = correct_query_spelling(question, collection_text)
     contextual_question = contextualize_question(
         standalone_question,
@@ -501,10 +509,15 @@ async def chat(
     )
     continuation = contextual_question != standalone_question
     contextual_question = correct_query_spelling(contextual_question, collection_text)
-    broad_summary = is_collection_overview(contextual_question, collection_context)
+    broad_summary = is_collection_overview(contextual_question, collection_context, section_outline)
     temporal_facts = extract_temporal_facts(contextual_question, collection_context)
     if temporal_facts:
-        answer = "Important dates and time periods found in the documents:\n\n" + "\n\n".join(
+        heading = (
+            "Deadlines and time limits found in the documents:"
+            if any(term in contextual_question.casefold() for term in ("deadline", "due date", "by when"))
+            else "Important dates and time periods found in the documents:"
+        )
+        answer = heading + "\n\n" + "\n\n".join(
             f"• {sentence}" for sentence, _ in temporal_facts
         )
         source_indexes = list(dict.fromkeys(index for _, index in temporal_facts))
@@ -574,6 +587,7 @@ async def chat(
                 previous_answer if continuation else None,
                 overview=broad_summary,
                 section_context=collection_context,
+                section_outline=section_outline,
             )
     else:
         answer = extractive_answer(
@@ -582,6 +596,7 @@ async def chat(
             previous_answer if continuation else None,
             overview=broad_summary,
             section_context=collection_context,
+            section_outline=section_outline,
         )
 
     no_evidence = "I don't have enough information in the retrieved passages" in answer
@@ -595,6 +610,7 @@ async def chat(
             previous_answer if continuation else None,
             overview=False,
             section_context=collection_context,
+            section_outline=section_outline,
         )
         if "I don't have enough information in the retrieved passages" not in collection_answer:
             answer = collection_answer

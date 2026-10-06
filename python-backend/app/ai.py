@@ -142,16 +142,23 @@ def extractive_answer(
     previous_answer: str | None = None,
     overview: bool | None = None,
     section_context: list[str] | None = None,
+    section_outline: list[tuple[tuple[str, ...], int | None]] | None = None,
 ) -> str:
     # Callers with the full collection should pass an explicit scope decision;
     # the default keeps the helper useful for standalone document summaries.
-    overview = is_collection_overview(question, passages) if overview is None else overview
+    overview = is_collection_overview(question, passages, section_outline) if overview is None else overview
     question = correct_query_spelling(question, passages)
-    section_rows = _extract_document_sections(section_context or passages)
+    section_rows = _merge_document_outline(section_context or passages, section_outline)
     section_titles = [title.casefold() for title, _, _ in section_rows]
     candidates: list[str] = []
     candidate_passage_indexes: list[int] = []
     for passage_index, passage in enumerate(passages):
+        passage_text = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage).casefold()
+        # TOC entries often collapse into one long PDF line and may end in a
+        # stray sentence. Detect them from this document's own parsed headings.
+        title_hits = sum(1 for title in section_titles if title and title in passage_text)
+        if len(section_titles) >= 4 and title_hits >= max(4, int(np.ceil(len(section_titles) * 0.2))):
+            continue
         passage_sentences = _extract_sentences(passage, section_titles)
         candidates.extend(passage_sentences)
         candidate_passage_indexes.extend([passage_index] * len(passage_sentences))
@@ -167,7 +174,24 @@ def extractive_answer(
         ]
         candidates = [sentence for sentence, _ in retained]
         candidate_passage_indexes = [passage_index for _, passage_index in retained]
-    if overview and not candidates:
+    # Exclude generic document-navigation prose from evidence ranking. These
+    # sentences describe the nearby section rather than answer its subject.
+    retained = [
+        (sentence, candidate_passage_indexes[index])
+        for index, sentence in enumerate(candidates)
+        if not re.search(
+            r"\b(?:this|the)\s+(?:section|chapter|document)\b.*\b(?:describes?|explains?|covers?|outlines?|discusses?)\b",
+            sentence,
+            re.IGNORECASE,
+        )
+    ]
+    candidates = [sentence for sentence, _ in retained]
+    candidate_passage_indexes = [passage_index for _, passage_index in retained]
+    structure_request = bool(
+        re.search(r"\b(?:main|key|overall|all)\b", question, re.IGNORECASE)
+        and re.search(r"\b(?:what\s+are|list|summari[sz]e|outline|overview)\b", question, re.IGNORECASE)
+    )
+    if overview and section_rows and structure_request:
         policy_sections = _top_level_sections_with_children(section_rows)
         if policy_sections:
             prior_text = (previous_answer or "").casefold()
@@ -177,11 +201,19 @@ def extractive_answer(
                 and row[0].casefold() not in prior_text
             ]
             if policy_sections:
-                return "Main policy areas identified in the document:\n\n" + "\n".join(
+                return "Main sections identified in the document:\n\n" + "\n".join(
                     f"• {title} (page {page})" if page else f"• {title}"
                     for title, page, _ in policy_sections
                 )
-            return "The main policy areas have been listed. Ask about one of those areas for its details."
+            return "The main sections have been listed. Ask about one of them for details."
+
+    if overview and not candidates:
+        policy_sections = _top_level_sections_with_children(section_rows)
+        if policy_sections:
+            return "Main sections identified in the document:\n\n" + "\n".join(
+                f"• {title} (page {page})" if page else f"• {title}"
+                for title, page, _ in policy_sections
+            )
 
     if not candidates:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
@@ -298,7 +330,7 @@ def extractive_answer(
                 and (best_passage_index is None or candidate_passage_indexes[idx] == best_passage_index)
                 and (
                     len(query_tokens) <= 1
-                    or evidence_strength[idx] >= collection_median_idf
+                    or evidence_strength[idx] >= collection_median_idf * 0.45
                 )
             ),
             key=lambda item: (-item[0], item[1]),
@@ -362,34 +394,39 @@ def extract_temporal_facts(question: str, passages: list[str], limit: int = 15) 
         rf"\b(?:next|this|last)\s+(?:{month_pattern}|{weekday_pattern})\b",
     )
     temporal_expression = re.compile("|".join(f"(?:{pattern})" for pattern in date_patterns), re.IGNORECASE)
-    facts: list[tuple[str, int]] = []
+    facts: list[tuple[float, int, str]] = []
     seen: set[str] = set()
+    deadline_request = bool(re.search(r"\b(?:deadline|deadlines|due date|due dates|by when)\b", question, re.IGNORECASE))
+    deadline_relation = re.compile(
+        r"\b(?:by|before|within|no later than|prior to|advance notice|due|deadline|submit(?:ted)?|notify|notice|expires?)\b",
+        re.IGNORECASE,
+    )
     for passage_index, passage in enumerate(passages):
         content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
-        # Work on lines as well as complete sentences: PDF extraction often
-        # leaves date-bearing list items without terminal punctuation.
-        parts: list[str] = []
-        for line in content.splitlines():
-            line = normalize_text(line).strip(" \u2022\u25a0\u25aa\u25cf*-\t")
-            if not line:
-                continue
-            parts.extend(_extract_sentences(line, []))
-            if not re.search(r"[.!?][\])'\u2019\"]*$", line) and len(line) >= 18:
-                parts.append(line)
+        # Keep complete sentences only. Appending unfinished PDF lines caused
+        # clipped fragments such as section tails to appear as dated evidence.
+        parts = _extract_sentences(content, [])
         for part in parts:
             normalized = normalize_text(part)
             if len(normalized) < 18:
                 continue
             if not temporal_expression.search(normalized):
                 continue
+            is_deadline = bool(deadline_relation.search(normalized))
+            if deadline_request and not is_deadline:
+                continue
             key = normalize_text(normalized).casefold()
             if key in seen:
                 continue
             seen.add(key)
-            facts.append((normalized, passage_index))
-            if len(facts) >= limit:
-                return facts
-    return facts
+            # Return explicit action deadlines before general durations while
+            # retaining document order for facts with equal evidence strength.
+            score = 1.0 if is_deadline else 0.0
+            if re.search(rf"\b(?:{month_pattern})\s+\d{{1,2}}|\b\d{{1,2}}[./-]\d{{1,2}}\b", normalized, re.IGNORECASE):
+                score += 0.25
+            facts.append((score, passage_index, normalized))
+    facts.sort(key=lambda item: -item[0])
+    return [(sentence, passage_index) for _, passage_index, sentence in facts[:limit]]
 
 
 def _extract_sentences(passage: str, section_titles: list[str]) -> list[str]:
@@ -461,7 +498,11 @@ def _top_level_sections_with_children(
     return primary
 
 
-def is_collection_overview(question: str, passages: list[str]) -> bool:
+def is_collection_overview(
+    question: str,
+    passages: list[str],
+    section_outline: list[tuple[tuple[str, ...], int | None]] | None = None,
+) -> bool:
     texts = [re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage) for passage in passages if passage.strip()]
     if not texts:
         return False
@@ -474,7 +515,11 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     terms = set(vectorizer.build_analyzer()(question))
     if not terms:
         return False
-    section_rows = _extract_document_sections(passages)
+    section_rows = _merge_document_outline(passages, section_outline)
+    generic_scope_form = bool(
+        re.search(r"\b(?:main|key|overall|all)\b", question, re.IGNORECASE)
+        and re.search(r"\b(?:what\s+are|list|summari[sz]e|outline|overview)\b", question, re.IGNORECASE)
+    )
     if section_rows:
         section_vectorizer = _word_vectorizer(strip_accents="unicode", ngram_range=(1, 1))
         try:
@@ -484,9 +529,9 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
                 (title, depth, set(section_vectorizer.build_analyzer()(title)) & query_terms)
                 for title, _, depth in section_rows
             ]
-            if any(depth > 0 and matched for _, depth, matched in title_matches):
+            if any(depth > 0 and matched for _, depth, matched in title_matches) and not generic_scope_form:
                 return False
-            if any(matched and len(matched) / max(1, len(query_terms)) >= 0.75 for _, _, matched in title_matches):
+            if any(matched and len(matched) / max(1, len(query_terms)) >= 0.75 for _, _, matched in title_matches) and not generic_scope_form:
                 return False
         except ValueError:
             pass
@@ -495,11 +540,16 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     # uploaded domain text. Infer their scope from the active collection's
     # vocabulary and query form rather than keeping a fixed intent phrase list.
     is_non_interrogative = not question.rstrip().endswith("?")
+    # A broad question may mention only a scope modifier and a generic
+    # collection noun, while its vocabulary weakly overlaps a heading such as
+    # "Policy revision". When a real hierarchy is present, the linguistic
+    # request form plus weak document overlap is enough to use that hierarchy.
+    has_document_outline = bool(_top_level_sections_with_children(section_rows))
     if query.nnz == 0:
         # A short standalone phrase is usually a specific topic, not a request
         # to summarize. Requiring several unmatched content terms keeps queries
         # such as "retention policy" from being answered with a random overview.
-        return len(terms) >= 3 and is_non_interrogative
+        return (len(terms) >= 3 and is_non_interrogative) or (has_document_outline and generic_scope_form)
     matched_idf = vectorizer.idf_[query.indices]
     # Use the active collection's information distribution to distinguish a
     # collection-level request from one anchored by a distinctive document term.
@@ -508,7 +558,7 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     if len(terms) <= 1:
         return False
     if coverage <= 0.5:
-        return len(terms) >= 3 and is_non_interrogative
+        return (len(terms) >= 3 and is_non_interrogative) or (has_document_outline and generic_scope_form)
     if len(terms) >= 3 and coverage >= 0.6:
         return False
     return float(matched_idf.mean()) < corpus_median_idf
@@ -567,22 +617,49 @@ def contextualize_question(
     return question
 
 
+def _merge_document_outline(
+    passages: list[str],
+    section_outline: list[tuple[tuple[str, ...], int | None]] | None,
+) -> list[tuple[str, str, int]]:
+    """Merge parser-provided heading paths with any outline recovered from text."""
+    rows = _extract_document_sections(passages)
+    seen = {title.casefold() for title, _, _ in rows}
+    for path, page in section_outline or []:
+        for depth, title in enumerate(path):
+            normalized_title = normalize_text(title)
+            key = normalized_title.casefold()
+            if not key or key in seen:
+                continue
+            rows.append((normalized_title, str(page or ""), depth))
+            seen.add(key)
+    return rows
+
+
 def correct_query_spelling(question: str, passages: list[str]) -> str:
     """Correct close misspellings against terms found in this collection only."""
-    vocabulary = {term.casefold() for passage in passages for term in TOKEN_RE.findall(passage)}
+    vocabulary = {term for passage in passages for term in lexical_tokens(passage)}
     corrected: list[str] = []
     for token in TOKEN_RE.findall(question):
-        word = token.casefold()
-        if word in vocabulary or len(word) < 5:
+        normalized = lexical_tokens(token)
+        word = normalized[0] if normalized else token.casefold()
+        if word in vocabulary or len(token) < 5:
             corrected.append(word)
             continue
-        choices = (
-            candidate
-            for candidate in vocabulary
-            if candidate[0] == word[0] and abs(len(candidate) - len(word)) <= max(1, round(len(word) * 0.2))
+        choices = sorted(
+            (
+                (SequenceMatcher(None, word, candidate).ratio(), candidate)
+                for candidate in vocabulary
+                if candidate[0] == word[0]
+                and abs(len(candidate) - len(word)) <= max(1, round(len(word) * 0.2))
+            ),
+            reverse=True,
         )
-        best = max(choices, key=lambda candidate: SequenceMatcher(None, word, candidate).ratio(), default=word)
-        corrected.append(best if SequenceMatcher(None, word, best).ratio() >= 0.78 else word)
+        best_score, best = choices[0] if choices else (0.0, word)
+        runner_up = choices[1][0] if len(choices) > 1 else 0.0
+        # Do not silently rewrite valid out-of-domain terms to unrelated words.
+        # Singular normalization above also resolves regular plural typos.
+        unambiguous_prefix = best.startswith(word) and best_score >= 0.88
+        corrected.append(best if unambiguous_prefix or (best_score >= 0.86 and best_score - runner_up >= 0.035) else word)
     return " ".join(corrected)
 
 

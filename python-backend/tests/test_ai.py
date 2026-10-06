@@ -36,6 +36,20 @@ class AiTests(unittest.TestCase):
 
         self.assertEqual(extract_temporal_facts("Summarize this document", passages), [])
 
+    def test_deadline_request_skips_working_hours_and_unfinished_pdf_fragments(self):
+        passages = [
+            "[handbook.pdf, chunk 1, page 5]\nFull-time employees work at least [30 hours] per week.\n"
+            "Submit expense claims within [three months] after the purchase date.\n"
+            "Employees receive [20 days] of Paid Time Off per year.\n"
+            "Notify your manager at least [two weeks] before your final day.\n"
+            "The benefits section continues with [some incomplete",
+        ]
+
+        facts = extract_temporal_facts("Find important dates and deadlines", passages)
+
+        self.assertEqual(len(facts), 2)
+        self.assertTrue(all("Submit expense claims" in fact or "Notify your manager" in fact for fact, _ in facts))
+
     def test_extractive_answer_selects_relevant_evidence(self):
         answer = extractive_answer(
             "What is the retention policy?",
@@ -111,6 +125,45 @@ Policy revision 35"""
         self.assertNotIn("Welcome", answer)
         self.assertNotIn("Policy revision", answer)
 
+    def test_generic_main_sections_question_uses_uploaded_outline(self):
+        toc = """[manual.pdf, chunk 2, page 2]
+Overview 1
+
+Data handling 2
+    Access control 3
+    Retention 4
+
+Operations 5
+    Incident response 6
+    Maintenance 7
+
+Revision history 9"""
+
+        self.assertTrue(is_collection_overview("What are the main policies?", [toc]))
+        answer = extractive_answer("What are the main policies?", [toc], overview=True)
+        self.assertIn("Data handling", answer)
+        self.assertIn("Operations", answer)
+        self.assertNotIn("Revision history", answer)
+
+    def test_generic_overview_uses_parser_heading_paths_without_a_contents_page(self):
+        passages = [
+            "[manual.docx, chunk 1, page 2]\nAccess is approved by the data owner.",
+            "[manual.docx, chunk 2, page 4]\nReport incidents to the operations team.",
+        ]
+        outline = [
+            (("Data handling",), 2),
+            (("Data handling", "Access control"), 2),
+            (("Operations",), 4),
+            (("Operations", "Incident response"), 4),
+        ]
+
+        self.assertTrue(is_collection_overview("What are the main policies?", passages, outline))
+        answer = extractive_answer(
+            "What are the main policies?", passages, overview=True, section_outline=outline
+        )
+        self.assertIn("Data handling", answer)
+        self.assertIn("Operations", answer)
+
     def test_pdf_wrapped_lines_become_complete_sentences_and_instruction_fragments_are_dropped(self):
         passage = """[Employee-Handbook.pdf, chunk 51, page 27]
 Paid time off (PTO)
@@ -168,6 +221,12 @@ the day you join our company.
         passages = ["Annual leave requests must be submitted to a supervisor."]
 
         self.assertEqual(correct_query_spelling("ask for leavs", passages), "ask for leave")
+
+    def test_query_correction_uses_plural_normalization_and_does_not_rewrite_unrelated_terms(self):
+        passages = ["Annual leave requests must be submitted to a supervisor."]
+
+        self.assertEqual(correct_query_spelling("wat are the anual leavs?", passages), "wat are the annual leave")
+        self.assertEqual(correct_query_spelling("vacation", passages), "vacation")
 
     def test_specific_followup_does_not_inherit_a_collection_overview(self):
         passages = ["Paid time off (PTO) requests need supervisor approval.", "Parental leave lasts 12 weeks."]
