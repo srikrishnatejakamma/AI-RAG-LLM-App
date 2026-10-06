@@ -5,9 +5,11 @@ from app.ai import (
     EmbeddingService,
     FunctionTool,
     OpenAIAgentOrchestrator,
+    _extract_sentences,
     contextualize_question,
     correct_query_spelling,
     extractive_answer,
+    is_collection_overview,
 )
 from app.config import Settings
 from app.models import ReadSourceToolArgs
@@ -53,6 +55,63 @@ class AiTests(unittest.TestCase):
         self.assertIn("safety hazards", answer)
         self.assertNotIn("This section describes", answer)
 
+    def test_policy_overview_uses_document_hierarchy_instead_of_random_sentences(self):
+        toc = """[Employee-Handbook.pdf, chunk 2, page 2]
+Welcome 4
+
+Employment basics 5
+    Employment contract types 5
+    Equal opportunity employment 5
+
+Workplace policies 8
+    Confidentiality and data protection 8
+    Harassment and violence 9
+
+Policy revision 35"""
+
+        answer = extractive_answer("What are the main policies?", [toc], overview=True)
+
+        self.assertIn("Employment basics (page 5)", answer)
+        self.assertIn("Workplace policies (page 8)", answer)
+        self.assertNotIn("Welcome", answer)
+        self.assertNotIn("Policy revision", answer)
+
+    def test_pdf_wrapped_lines_become_complete_sentences_and_instruction_fragments_are_dropped(self):
+        passage = """[Employee-Handbook.pdf, chunk 51, page 27]
+Paid time off (PTO)
+Employees receive [20 days] of Paid Time Off (PTO) per year. Your PTO accrual begins
+the day you join our company.
+
+[Insert this if employees are in the U.S: If you are an exempt employee, you are not"""
+
+        sentences = _extract_sentences(passage, ["paid time off (pto)"])
+
+        self.assertIn("Employees receive [20 days] of Paid Time Off (PTO) per year.", sentences)
+        self.assertIn("Your PTO accrual begins the day you join our company.", sentences)
+        self.assertFalse(any("Insert this" in sentence for sentence in sentences))
+
+    def test_detail_answer_does_not_jump_to_a_different_section_on_one_shared_word(self):
+        answer = extractive_answer(
+            "Annual Leave",
+            [
+                "[performance.pdf] Revisit those goals during [annual/ bi-annual/ quarterly] performance reviews.",
+                "[parental.pdf] Eligible employees may take up to 12 weeks of parental leave after a birth or adoption.",
+                "[pto.pdf] Paid time off requests must be submitted to a supervisor 10 days before leave begins.",
+            ],
+            overview=False,
+        )
+
+        self.assertIn("I don't have enough information", answer)
+        self.assertNotIn("parental leave", answer)
+
+    def test_annual_leave_is_a_detail_query_even_when_the_collection_only_says_leave(self):
+        passages = [
+            "Paid time off (PTO) requests need supervisor approval.",
+            "Eligible employees may take parental leave after a birth or adoption.",
+        ]
+
+        self.assertFalse(is_collection_overview("Annual Leave", passages))
+
     def test_extractive_answer_reports_no_supporting_evidence(self):
         answer = extractive_answer("What is the retention policy?", ["[office.txt] The office is near the river."])
 
@@ -83,6 +142,39 @@ class AiTests(unittest.TestCase):
             contextualize_question("more", ["What are the main policies?", "Explain PTO"], passages),
             "Explain PTO more",
         )
+
+    def test_followup_can_resolve_topic_from_previous_grounded_answer(self):
+        passages = [
+            "Paid time off (PTO) requests need approval. Employees may use PTO or sick leave.",
+            "Eligible employees may take parental leave after a birth or adoption.",
+        ]
+
+        self.assertEqual(
+            contextualize_question(
+                "Annual Leave",
+                ["PTO"],
+                passages,
+                previous_answers=["PTO can be used for time away from work. Employees may use PTO or sick leave."],
+            ),
+            "PTO Annual Leave",
+        )
+
+    def test_annual_leave_followup_uses_the_previous_pto_evidence(self):
+        passages = [
+            "[pto.pdf, page 1] Paid time off (PTO)\nEmployees receive [20 days] of Paid Time Off (PTO) per year. Employees may use PTO or sick leave.",
+            "[parental.pdf, page 1] Eligible employees may take up to 12 weeks of parental leave after a birth or adoption.",
+        ]
+        answer_text = "PTO can be used for time away from work. Employees may use PTO or sick leave."
+        contextual_question = contextualize_question(
+            "Annual Leave", ["PTO"], passages, previous_answers=[answer_text]
+        )
+
+        answer = extractive_answer(
+            contextual_question, passages, overview=False, section_context=passages
+        )
+
+        self.assertIn("Paid Time Off (PTO)", answer)
+        self.assertNotIn("parental leave", answer)
 
     def test_embedding_service_uses_local_provider_by_default_and_rejects_missing_openai_key(self):
         local = EmbeddingService(Settings(admin_password="secret", embedding_provider="local", openai_api_key=""))

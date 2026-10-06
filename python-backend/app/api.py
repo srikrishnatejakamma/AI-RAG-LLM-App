@@ -465,6 +465,7 @@ async def chat(
 
     history = payload.history[-8:]
     prior_user_messages = [item.text for item in history if item.role == "user"]
+    prior_assistant_messages = [item.text for item in history if item.role == "assistant"]
     previous_answer = next((item.text for item in reversed(history) if item.role == "assistant"), "")
     ready_chunks = tuple(
         (document, chunk)
@@ -478,7 +479,12 @@ async def chat(
         for document, chunk in ready_chunks
     ]
     standalone_question = correct_query_spelling(question, collection_text)
-    contextual_question = contextualize_question(standalone_question, prior_user_messages, collection_text)
+    contextual_question = contextualize_question(
+        standalone_question,
+        prior_user_messages,
+        collection_text,
+        previous_answers=prior_assistant_messages,
+    )
     continuation = contextual_question != standalone_question
     contextual_question = correct_query_spelling(contextual_question, collection_text)
     broad_summary = is_collection_overview(contextual_question, collection_context)

@@ -146,28 +146,42 @@ def extractive_answer(
     # the default keeps the helper useful for standalone document summaries.
     overview = is_collection_overview(question, passages) if overview is None else overview
     question = correct_query_spelling(question, passages)
-    candidates: list[str] = []
-    for passage in passages:
-        content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
-        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])|\n+", content):
-            cleaned = normalize_text(sentence)
-            if len(cleaned) < 24:
-                continue
-            # Omit unresolved fill-in values so template alternatives are not presented as policy.
-            if re.search(r"\[[^\]]+\]", cleaned):
-                continue
-            candidates.append(cleaned)
     section_rows = _extract_document_sections(section_context or passages)
     section_titles = [title.casefold() for title, _, _ in section_rows]
+    candidates: list[str] = []
+    candidate_passage_indexes: list[int] = []
+    for passage_index, passage in enumerate(passages):
+        passage_sentences = _extract_sentences(passage, section_titles)
+        candidates.extend(passage_sentences)
+        candidate_passage_indexes.extend([passage_index] * len(passage_sentences))
     if section_titles:
-        candidates = [
-            sentence for sentence in candidates
+        retained = [
+            (sentence, candidate_passage_indexes[index])
+            for index, sentence in enumerate(candidates)
             if not any(
                 sentence.casefold().startswith(title)
                 and (len(sentence) == len(title) or sentence[len(title) : len(title) + 1] in {" ", ".", ":", "-"})
                 for title in section_titles
             )
         ]
+        candidates = [sentence for sentence, _ in retained]
+        candidate_passage_indexes = [passage_index for _, passage_index in retained]
+    if overview:
+        policy_sections = _top_level_sections_with_children(section_rows)
+        if policy_sections:
+            prior_text = (previous_answer or "").casefold()
+            policy_sections = [
+                row for row in policy_sections
+                if f"{row[0]} (page {row[1]})".casefold() not in prior_text
+                and row[0].casefold() not in prior_text
+            ]
+            if policy_sections:
+                return "Main policy areas identified in the document:\n\n" + "\n".join(
+                    f"• {title} (page {page})" if page else f"• {title}"
+                    for title, page, _ in policy_sections
+                )
+            return "The main policy areas have been listed. Ask about one of those areas for its details."
+
     if not candidates:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
 
@@ -217,12 +231,23 @@ def extractive_answer(
                     (float(similarities[idx, chosen]) for chosen in selected_indexes), default=0.0
                 ),
             )
-            selected.append(candidates[best_idx] if len(candidates[best_idx]) <= 320 else candidates[best_idx][:317] + "\u2026")
+            selected.append(candidates[best_idx])
             selected_indexes.append(best_idx)
             remaining.remove(best_idx)
     else:
         char_scores = cosine_similarity(char_matrix[1:], char_matrix[0]).ravel()
         word_scores = cosine_similarity(word_matrix, word_vectorizer.transform([question])).ravel()
+        best_passage_index: int | None = None
+        if query_tokens:
+            overlap_counts = [
+                len(query_tokens.intersection(lexical_tokens(passage)))
+                for passage in passages
+            ]
+            if overlap_counts and max(overlap_counts) > 0:
+                best_passage_index = max(
+                    range(len(passages)),
+                    key=lambda index: (overlap_counts[index], -index),
+                )
         fuzzy_scores: list[float] = []
         evidence_strength: list[float] = []
         collection_median_idf = (
@@ -258,6 +283,7 @@ def extractive_answer(
                 )
                 for idx in range(len(candidates))
                 if (word_scores[idx] > 0 or fuzzy_scores[idx] > 0)
+                and (best_passage_index is None or candidate_passage_indexes[idx] == best_passage_index)
                 and (
                     len(query_tokens) <= 1
                     or evidence_strength[idx] >= collection_median_idf
@@ -269,13 +295,85 @@ def extractive_answer(
             if any(float(cosine_similarity(char_matrix[idx + 1], char_matrix[prior + 1])[0, 0]) >= 0.86 for prior in selected_indexes):
                 continue
             sentence = candidates[idx]
-            selected.append(sentence if len(sentence) <= 320 else sentence[:317] + "\u2026")
+            selected.append(sentence)
             selected_indexes.append(idx)
             if len(selected) == 3:
                 break
     if not selected:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
-    return "Based on the document:\n\n\u2022 " + "\n\n\u2022 ".join(selected)
+    answer = "Based on the document:\n\n\u2022 " + "\n\n\u2022 ".join(selected)
+    if any(re.search(r"\[[^\]]+\]", sentence) for sentence in selected):
+        answer = "The document contains unfilled values in brackets.\n\n" + answer
+    return answer
+
+
+def _extract_sentences(passage: str, section_titles: list[str]) -> list[str]:
+    """Rejoin PDF line wraps and keep complete, readable sentences only."""
+    content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
+    content = re.sub(r"([.!?])(?=[A-Z])", r"\1 ", content)
+    titles = sorted(section_titles, key=len, reverse=True)
+    sentences: list[str] = []
+    for paragraph in re.split(r"\n\s*\n+", content):
+        lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+        if len(lines) > 1:
+            first_line = re.sub(r"^[\u2022\u25a0\u25aa\u25cf*-]+\s*", "", lines[0])
+            if (
+                len(first_line) <= 80
+                and not re.search(r"[.!?;:]$", first_line)
+                and len(TOKEN_RE.findall(first_line)) <= 10
+                and next((char for char in lines[1] if char.isalpha()), "").isupper()
+            ):
+                lines = lines[1:]
+        wrapped = normalize_text(" ".join(lines))
+        wrapped = re.sub(r"^(?:[\u2022\u25a0\u25aa\u25cf*-]+\s*)+", "", wrapped)
+        for title in titles:
+            if wrapped.casefold().startswith(title) and (
+                len(wrapped) == len(title)
+                or wrapped[len(title) : len(title) + 1] in {" ", ".", ":", "-", "("}
+            ):
+                wrapped = wrapped[len(title) :].lstrip(" .:-")
+                break
+        boundaries = re.compile(r"(?<=[.!?])([\])'\u2019\"]+)?\s+(?=[A-Z0-9\[])")
+        sentence_parts: list[str] = []
+        start = 0
+        for boundary in boundaries.finditer(wrapped):
+            end = boundary.start() + len(boundary.group(1) or "")
+            sentence_parts.append(wrapped[start:end])
+            start = boundary.end()
+        sentence_parts.append(wrapped[start:])
+        for sentence in sentence_parts:
+            cleaned = normalize_text(sentence).strip(" \u2022\u25a0\u25aa\u25cf*-\t")
+            if len(cleaned) < 24 or not re.search(r"[.!?][\])'\u2019\"]*$", cleaned):
+                continue
+            alpha = next((char for char in cleaned if char.isalpha()), "")
+            if alpha and alpha.islower():
+                continue
+            placeholders = re.findall(r"\[([^\]]*)\]", cleaned)
+            if cleaned.count("[") != cleaned.count("]"):
+                continue
+            if any(
+                ":" in value or "/" in value or len(TOKEN_RE.findall(value)) > 4
+                for value in placeholders
+            ):
+                continue
+            sentences.append(cleaned)
+    return sentences
+
+
+def _top_level_sections_with_children(
+    sections: list[tuple[str, str, int]],
+) -> list[tuple[str, str, int]]:
+    primary: list[tuple[str, str, int]] = []
+    for index, section in enumerate(sections):
+        if section[2] != 0:
+            continue
+        end = next(
+            (position for position in range(index + 1, len(sections)) if sections[position][2] == 0),
+            len(sections),
+        )
+        if any(child[2] > 0 for child in sections[index + 1 : end]):
+            primary.append(section)
+    return primary
 
 
 def is_collection_overview(question: str, passages: list[str]) -> bool:
@@ -315,10 +413,19 @@ def is_collection_overview(question: str, passages: list[str]) -> bool:
     # collection-level request from one anchored by a distinctive document term.
     # This avoids domain-specific intent words and adapts as documents change.
     corpus_median_idf = float(np.median(vectorizer.idf_))
-    return coverage < 0.5 or float(matched_idf.mean()) < corpus_median_idf
+    if len(terms) <= 1 or coverage <= 0.5:
+        return False
+    if len(terms) >= 3 and coverage >= 0.6:
+        return False
+    return float(matched_idf.mean()) < corpus_median_idf
 
 
-def contextualize_question(question: str, previous_questions: list[str], passages: list[str]) -> str:
+def contextualize_question(
+    question: str,
+    previous_questions: list[str],
+    passages: list[str],
+    previous_answers: list[str] | None = None,
+) -> str:
     texts = [re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage) for passage in passages if passage.strip()]
     if not texts:
         return question
@@ -340,12 +447,23 @@ def contextualize_question(question: str, previous_questions: list[str], passage
     if query.nnz:
         similarities = cosine_similarity(query, previous_vectors).ravel()
         best_index = int(np.argmax(similarities)) if similarities.size else -1
-        if best_index < 0 or similarities[best_index] <= 0:
-            return question
-        query_idf = vectorizer.idf_[query.indices]
-        if float(query_idf.mean()) >= float(np.median(vectorizer.idf_)):
-            return question
-        return f"{candidates[best_index]} {question}"
+        if best_index >= 0 and similarities[best_index] > 0:
+            query_idf = vectorizer.idf_[query.indices]
+            if float(query_idf.mean()) < float(np.median(vectorizer.idf_)):
+                return f"{candidates[best_index]} {question}"
+
+        # A specific follow-up may use a different phrase from the previous
+        # question while referring to its answer (for example, a topic named in
+        # a retrieved PTO passage). Resolve that link from collection terms.
+        answers = previous_answers or []
+        for index in range(min(len(candidates), len(answers)) - 1, -1, -1):
+            if not answers[index].strip() or is_collection_overview(candidates[index], passages):
+                continue
+            answer_vector = vectorizer.transform([answers[index]])
+            shared = np.intersect1d(query.indices, answer_vector.indices)
+            if shared.size and float(np.min(vectorizer.idf_[shared])) <= float(np.median(vectorizer.idf_)):
+                return f"{candidates[index]} {question}"
+        return question
 
     # Queries with no collection vocabulary are usually referential follow-ups.
     # Attach them to the most recent earlier turn that has collection evidence.
