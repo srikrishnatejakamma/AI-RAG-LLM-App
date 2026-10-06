@@ -13,7 +13,9 @@ def normalize_text(text: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    normalized = normalize_text(text)
+    # Keep source line boundaries so section titles remain distinguishable after indexing.
+    normalized = re.sub(r"[ \t\r\f\v]+", " ", text)
+    normalized = re.sub(r" *\n *", "\n", normalized).strip()
     if not normalized:
         return []
     if chunk_size < 1:

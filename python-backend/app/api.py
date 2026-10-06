@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadF
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response
 
-from .ai import EmbeddingService, OpenAIAgentOrchestrator, extractive_answer
+from .ai import EmbeddingService, OpenAIAgentOrchestrator, correct_query_spelling, extractive_answer
 from .config import Settings
 from .domain import CollectionData, DocumentData, SessionData
 from .file_search import OpenAIFileSearch
@@ -458,15 +458,28 @@ async def chat(
         raise HTTPException(status_code=400, detail={"error": "Question must be 2,000 characters or fewer"})
 
     history = payload.history[-8:]
-    previous_user = next((item.text for item in reversed(history) if item.role == "user"), "")
+    prior_user_messages = [item.text for item in history if item.role == "user"]
+    previous_user = prior_user_messages[-1] if prior_user_messages else ""
+    if previous_user and re.search(r"\b(?:more|continue|elaborate|expand)\b", previous_user, re.IGNORECASE):
+        previous_user = next((item for item in reversed(prior_user_messages[:-1]) if item), previous_user)
     previous_answer = next((item.text for item in reversed(history) if item.role == "assistant"), "")
+    ready_chunks = tuple(
+        (document, chunk)
+        for document in collection.documents.values()
+        if document.status == "READY"
+        for chunk in document.chunks
+    )
+    collection_text = [chunk.text for _, chunk in ready_chunks]
     contextual_question = question
-    if previous_user and re.fullmatch(r"(?:more|tell me more|go on|continue|elaborate|expand(?: on that)?|explain further)[.!?\s]*", question, re.IGNORECASE):
-        prior_was_summary = bool(re.search(r"\b(?:summari[sz]e|overview|highlights?|key\s+points?|main\s+polic(?:y|ies))\b", previous_user, re.IGNORECASE))
+    is_short_followup = len(re.findall(r"[\w']+", question)) <= 4
+    if previous_user and (is_short_followup or re.fullmatch(r"(?:tell me more|go on|continue|elaborate|expand(?: on that)?|explain further)[.!?\s]*", question, re.IGNORECASE)):
+        prior_intent = correct_query_spelling(previous_user, collection_text)
+        prior_was_summary = bool(re.search(r"\b(?:summari[sz]e|overview|highlights?|key\s+points?|main\s+polic(?:y|ies))\b", prior_intent, re.IGNORECASE))
         contextual_question = (
-            previous_user + ". Continue with additional distinct key points."
+            previous_user + ". Continue with additional distinct policy sections."
             if prior_was_summary else previous_user + ". Please explain further."
         )
+    contextual_question = correct_query_spelling(contextual_question, collection_text)
 
     broad_policy_list = bool(re.search(r"\b(?:main|full|key|major|primary|all|list)\b.{0,32}\bpolic(?:y|ies)\b|\bpolic(?:y|ies)\b.{0,32}\b(?:main|full|key|major|primary|all|list)\b", contextual_question, re.IGNORECASE))
     broad_summary = broad_policy_list or bool(re.search(r"\b(?:summari[sz]e|overview|highlights?)\b|\b(?:key|main)\s+points?\b", contextual_question, re.IGNORECASE))
@@ -496,12 +509,6 @@ async def chat(
         return {"answer": answer, "sources": citations, "grounded": True}
 
     query_vec = await asyncio.to_thread(ctx.embedding_service.embed, contextual_question)
-    ready_chunks = tuple(
-        (document, chunk)
-        for document in collection.documents.values()
-        if document.status == "READY"
-        for chunk in document.chunks
-    )
     matches = await asyncio.to_thread(
         ctx.retriever.retrieve,
         collection.id,

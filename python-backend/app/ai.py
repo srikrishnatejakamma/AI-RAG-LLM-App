@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -16,6 +17,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from .config import Settings
 from .models import FindSourcesToolArgs, ReadSourceToolArgs
 from .text_pipeline import (
+    TOKEN_RE,
     embed_local,
     normalize_text,
 )
@@ -126,16 +128,36 @@ def extractive_answer(
     passages: list[str],
     previous_answer: str | None = None,
 ) -> str:
+    policy_list_intent = bool(re.search(
+        r"\b(?:policy|policies)\b|\bpolic(?:y|ies)\b",
+        question,
+        re.IGNORECASE,
+    ))
+    all_sections_intent = bool(re.search(r"\b(?:all|every|complete|entire)\b|\blist\b", question, re.IGNORECASE))
+    continuation_intent = bool(re.search(r"\b(?:additional|continue|more)\b", question, re.IGNORECASE))
     summary_intent = bool(re.search(
         r"\b(?:summari[sz]e|key\s+points?|highlights?|overview|main\s+points?|list\s+the)\b|"
         r"\b(?:main|key|all|list)\b.{0,32}\bpolic(?:y|ies)\b|"
         r"\bpolic(?:y|ies)\b.{0,32}\b(?:main|key|all|list)\b",
         question, re.IGNORECASE,
     ))
+    if policy_list_intent:
+        sections = _extract_document_sections(passages)
+        if sections:
+            previous = (previous_answer or "").casefold()
+            if continuation_intent and not all_sections_intent:
+                sections = [section for section in sections if section[0].casefold() not in previous]
+            limit = 50 if all_sections_intent else 16
+            selected_sections = sections[:limit]
+            if selected_sections:
+                return "Based on the document, these policy sections were found:\n\n" + "\n\n".join(
+                    f"- **{title}** — {description}" if description else f"- **{title}**"
+                    for title, description in selected_sections
+                )
     candidates: list[str] = []
     for passage in passages:
         content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
-        for sentence in re.split(r"(?<=[.!?])\s+|\n+", content):
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])|\n+", content):
             cleaned = normalize_text(sentence)
             if len(cleaned) < 24:
                 continue
@@ -160,7 +182,7 @@ def extractive_answer(
             for line in (previous_answer or "").splitlines()
             if len(line.strip()) > 24
         }
-        excerpt_limit = 8
+        excerpt_limit = 16 if policy_list_intent and all_sections_intent else 10 if policy_list_intent else 8
         remaining = [idx for idx, sentence in enumerate(candidates) if not any(
             sentence.casefold() in prior or prior in sentence.casefold() for prior in prior_lines
         )]
@@ -194,6 +216,62 @@ def extractive_answer(
     if not selected:
         return "I don't have enough information in the retrieved passages to answer that precisely. Try a more specific question."
     return "Based on the document:\n\n\u2022 " + "\n\n\u2022 ".join(selected)
+
+
+def correct_query_spelling(question: str, passages: list[str]) -> str:
+    """Correct close misspellings against terms found in this collection only."""
+    vocabulary = {term.casefold() for passage in passages for term in TOKEN_RE.findall(passage)}
+    corrected: list[str] = []
+    for token in TOKEN_RE.findall(question):
+        word = token.casefold()
+        if word in vocabulary or len(word) < 5:
+            corrected.append(word)
+            continue
+        choices = (candidate for candidate in vocabulary if candidate[0] == word[0] and abs(len(candidate) - len(word)) <= 2)
+        best = max(choices, key=lambda candidate: SequenceMatcher(None, word, candidate).ratio(), default=word)
+        corrected.append(best if SequenceMatcher(None, word, best).ratio() >= 0.78 else word)
+    return " ".join(corrected)
+
+
+def _extract_document_sections(passages: list[str]) -> list[tuple[str, str]]:
+    lines: list[str] = []
+    for passage in passages:
+        content = re.sub(r"(?s)^\[[^\]]*\]\s*", "", passage)
+        lines.extend(line.strip() for line in content.splitlines() if line.strip())
+
+    def looks_like_heading(line: str, following: str) -> bool:
+        words = TOKEN_RE.findall(line)
+        return (
+            1 <= len(words) <= 8
+            and len(line) <= 72
+            and not re.search(r"[.!?;:]$|\[[^\]]*\]|\.{2,}", line)
+            and not line[:1].isdigit()
+            and line[:1].isupper()
+            and len(following) >= 36
+        )
+
+    positions = [idx for idx in range(len(lines) - 1) if looks_like_heading(lines[idx], lines[idx + 1])]
+    title_counts: dict[str, int] = {}
+    for idx in positions:
+        title = normalize_text(lines[idx]).casefold()
+        title_counts[title] = title_counts.get(title, 0) + 1
+
+    sections: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for position_idx, line_idx in enumerate(positions):
+        title = normalize_text(lines[line_idx])
+        if title_counts[title.casefold()] > 2 or title.casefold() in seen:
+            continue
+        next_heading = positions[position_idx + 1] if position_idx + 1 < len(positions) else min(len(lines), line_idx + 5)
+        body = " ".join(lines[line_idx + 1:next_heading])
+        body = re.sub(r"\[[^\]]+\]", "", body)
+        sentences = [normalize_text(item) for item in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", body) if len(normalize_text(item)) >= 24]
+        description = " ".join(sentences[:2])
+        if len(description) > 300:
+            description = description[:297] + "..."
+        sections.append((title, description))
+        seen.add(title.casefold())
+    return sections
 
 
 class OpenAIAgentOrchestrator:
