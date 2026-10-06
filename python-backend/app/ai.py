@@ -151,7 +151,7 @@ def extractive_answer(
             selected_sections = sections[:limit]
             if selected_sections:
                 return "Based on the document, these policy sections were found:\n\n" + "\n\n".join(
-                    f"- **{title}** — {description}" if description else f"- **{title}**"
+                    f"- **{title}**: {description}" if description else f"- **{title}**"
                     for title, description in selected_sections
                 )
     candidates: list[str] = []
