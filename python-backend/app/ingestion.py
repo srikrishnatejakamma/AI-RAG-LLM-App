@@ -527,7 +527,6 @@ def extract_and_build_chunks(
             log.warning(
                 "Docling dependencies are unavailable; using native extraction fallback for %s",
                 normalized_extension,
-                exc_info=True,
             )
             elements = _parse_with_native(normalized_extension, payload, text_encoding)
         except Exception as exc:
@@ -539,7 +538,6 @@ def extract_and_build_chunks(
                 "Docling could not process %s; using native extraction fallback: %s",
                 normalized_extension,
                 exc,
-                exc_info=True,
             )
             elements = _parse_with_native(normalized_extension, payload, text_encoding)
     elif provider == "docling" and docling_format:
