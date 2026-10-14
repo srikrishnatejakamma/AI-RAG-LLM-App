@@ -2,9 +2,11 @@
 
 ## Scope and service layout
 
-`java-backend/` is the primary Spring Boot application. It serves the built-in UI and API; the React application in `frontend/` can run through Vite during development or be packaged into the Java application for deployment. Docker Compose builds the Java application and React UI and starts PostgreSQL with pgvector.
+Java (Spring Boot) and Python (FastAPI) are both primary backend options for the shared collection, document, chat, session, and audit API. See the [workflow diagrams in the root README](../README.md#detailed-workflow-diagrams) for their request and processing paths.
 
-`python-backend/` is an optional FastAPI implementation of the API. It uses in-memory storage and is not part of the Docker Compose deployment. The Java application defaults to port 8080; the Python run command in the README also selects port 8080. Use different ports if running both, and note that the React development proxy targets the Java application.
+`java-backend/` serves the built-in UI and API; the React application in `frontend/` can run through Vite during development or be packaged into the Java application for deployment. Docker Compose builds the Java application and React UI and starts PostgreSQL with pgvector.
+
+`python-backend/` is the primary FastAPI backend option. It uses in-memory storage and is not part of the Docker Compose deployment. The Java application defaults to port 8080; the Python run command in the README also selects port 8080. The React development proxy reaches either backend at `localhost:8080`. Use different ports if running both, and configure the proxy to select the intended backend.
 
 ## Request path
 
